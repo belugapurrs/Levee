@@ -37,8 +37,19 @@ async function getWalletClient(wallet: ConnectedWallet) {
   });
 }
 
+// `new Date("2026-12-02")` parses date-only strings as UTC midnight, which lands on a
+// different day/time locally. Build the date from parts so it is local midnight.
+function dateInputToTimestamp(dateInput: string) {
+  const [year, month, day] = dateInput.split("-").map(Number);
+  return BigInt(Math.floor(new Date(year, month - 1, day).getTime() / 1000));
+}
+
 function formatUnlockDate(unlockDate: bigint) {
-  return new Date(Number(unlockDate) * 1000).toLocaleString();
+  return new Date(Number(unlockDate) * 1000).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 }
 
 export default function Home() {
@@ -150,13 +161,12 @@ export default function Home() {
     setCommitHash(null);
     setCommitError(null);
     try {
-      const unlockTimestamp = BigInt(Math.floor(new Date(commitDate).getTime() / 1000));
       const walletClient = await getWalletClient(embeddedWallet);
       const hash = await walletClient.writeContract({
         address: LEVEE_ADDRESS as Address,
         abi: LEVEE_ABI,
         functionName: "commit",
-        args: [parseEther(commitAmount), unlockTimestamp, commitLabel],
+        args: [parseEther(commitAmount), dateInputToTimestamp(commitDate), commitLabel],
       });
       await publicClient.waitForTransactionReceipt({ hash });
       setCommitHash(hash);
