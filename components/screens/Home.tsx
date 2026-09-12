@@ -129,6 +129,7 @@ function HoldRow({
 export function HomeScreen({
   address,
   freeBalance,
+  walletBalance,
   commitments,
   phase,
   readError,
@@ -140,6 +141,7 @@ export function HomeScreen({
 }: {
   address: string;
   freeBalance: bigint | null;
+  walletBalance: bigint | null;
   commitments: Commitment[] | null;
   phase: FlowPhase;
   readError: string | null;
@@ -168,6 +170,14 @@ export function HomeScreen({
           </p>
           <p className="body-sm" style={{ marginTop: 8 }}>
             available right now
+          </p>
+          <p className="body-sm" style={{ marginTop: 4, fontSize: 13 }}>
+            {walletBalance === null ? (
+              "—"
+            ) : (
+              <span style={{ fontWeight: 600, color: "var(--text-2)" }}>{eth(walletBalance)} ETH</span>
+            )}{" "}
+            available to add
           </p>
         </div>
         {total > 0n && (

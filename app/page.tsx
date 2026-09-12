@@ -61,6 +61,7 @@ export default function Home() {
 
   const [freeBalance, setFreeBalance] = useState<bigint | null>(null);
   const [commitments, setCommitments] = useState<Commitment[] | null>(null);
+  const [walletBalance, setWalletBalance] = useState<bigint | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
 
   const [tab, setTab] = useState<Tab>("home");
@@ -101,6 +102,13 @@ export default function Home() {
     } catch (err) {
       setReadError(`commitmentsOf read failed: ${String(err)}`);
     }
+
+    try {
+      const result = await publicClient.getBalance({ address });
+      setWalletBalance(result);
+    } catch (err) {
+      setReadError(`wallet balance read failed: ${String(err)}`);
+    }
   }, [embeddedWallet]);
 
   useEffect(() => {
@@ -126,6 +134,11 @@ export default function Home() {
       })
       .then((result) => setCommitments(result as unknown as Commitment[]))
       .catch((err) => setReadError(`commitmentsOf read failed: ${String(err)}`));
+
+    publicClient
+      .getBalance({ address })
+      .then((result) => setWalletBalance(result))
+      .catch((err) => setReadError(`wallet balance read failed: ${String(err)}`));
   }, [embeddedWallet]);
 
   // deposit()
@@ -301,6 +314,7 @@ export default function Home() {
             key="home"
             address={address}
             freeBalance={freeBalance}
+            walletBalance={walletBalance}
             commitments={commitments}
             phase={flowPhase}
             readError={readError}
