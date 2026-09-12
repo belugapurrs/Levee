@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { usePrivy, useWallets, type ConnectedWallet } from "@privy-io/react-auth";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   createPublicClient,
   createWalletClient,
@@ -14,18 +15,14 @@ import {
 } from "viem";
 import { sepolia } from "viem/chains";
 import { LEVEE_ADDRESS, LEVEE_ABI } from "@/lib/leveeAbi";
+import { screenTransition } from "@/components/motion";
+import type { LeveePhase } from "@/components/LeveeVisual";
+import { CommitScreen, HomeScreen, MoveScreen, RefuseScreen, type Commitment } from "@/components/screens";
 
 const publicClient = createPublicClient({
   chain: sepolia,
   transport: http(),
 });
-
-type Commitment = {
-  amount: bigint;
-  unlockDate: bigint;
-  label: string;
-  released: boolean;
-};
 
 async function getWalletClient(wallet: ConnectedWallet) {
   await wallet.switchChain(sepolia.id);
@@ -44,13 +41,7 @@ function dateInputToTimestamp(dateInput: string) {
   return BigInt(Math.floor(new Date(year, month - 1, day).getTime() / 1000));
 }
 
-function formatUnlockDate(unlockDate: bigint) {
-  return new Date(Number(unlockDate) * 1000).toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
+type View = "home" | "commit" | "deposit" | "spend" | "refused";
 
 export default function Home() {
   const { ready, authenticated, login, logout } = usePrivy();
@@ -61,6 +52,10 @@ export default function Home() {
   const [freeBalance, setFreeBalance] = useState<bigint | null>(null);
   const [commitments, setCommitments] = useState<Commitment[] | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
+
+  const [view, setView] = useState<View>("home");
+  const [phase, setPhase] = useState<LeveePhase>("idle");
+  const [pulseKey, setPulseKey] = useState(0);
 
   const refreshReads = useCallback(async () => {
     if (!embeddedWallet) return;
@@ -139,6 +134,8 @@ export default function Home() {
       await publicClient.waitForTransactionReceipt({ hash });
       setDepositHash(hash);
       await refreshReads();
+      setDepositAmount("");
+      setView("home");
     } catch (err) {
       setDepositError(String(err));
     } finally {
@@ -171,6 +168,13 @@ export default function Home() {
       await publicClient.waitForTransactionReceipt({ hash });
       setCommitHash(hash);
       await refreshReads();
+      setCommitAmount("");
+      setCommitDate("");
+      setCommitLabel("");
+      setPulseKey((k) => k + 1);
+      setPhase("sealing");
+      setView("home");
+      window.setTimeout(() => setPhase("idle"), 1400);
     } catch (err) {
       setCommitError(String(err));
     } finally {
@@ -204,6 +208,7 @@ export default function Home() {
 
       if (!allowed) {
         setSpendBlock({ label, unlockDate });
+        setView("refused");
         return;
       }
 
@@ -217,6 +222,8 @@ export default function Home() {
       await publicClient.waitForTransactionReceipt({ hash });
       setSpendHash(hash);
       await refreshReads();
+      setSpendAmount("");
+      setView("home");
     } catch (err) {
       setSpendError(String(err));
     } finally {
@@ -225,111 +232,128 @@ export default function Home() {
   }
 
   if (!ready) {
-    return <p>loading...</p>;
+    return (
+      <div className="center">
+        <span className="wordmark">Levee</span>
+      </div>
+    );
   }
 
   if (!authenticated) {
-    return <button onClick={login}>Log in</button>;
+    return (
+      <motion.div className="center" {...screenTransition}>
+        <span className="wordmark">Levee</span>
+        <h1 className="display" style={{ maxWidth: "14ch" }}>
+          Money that stays put.
+        </h1>
+        <p className="serif-note" style={{ maxWidth: "34ch" }}>
+          Name an amount, name a date. It will not move until then — not for anyone, including you.
+        </p>
+        <div style={{ width: "min(22rem, 100%)", marginTop: "0.5rem" }}>
+          <button className="btn" onClick={login}>
+            Continue
+          </button>
+        </div>
+      </motion.div>
+    );
+  }
+
+  if (!embeddedWallet) {
+    return (
+      <div className="center">
+        <span className="wordmark">Levee</span>
+        <p className="serif-note">Setting up your wallet…</p>
+      </div>
+    );
   }
 
   return (
-    <div>
-      <p>wallet address: {embeddedWallet ? embeddedWallet.address : "no embedded wallet found"}</p>
-      <button onClick={() => logout()}>Log out</button>
-
-      <p>
-        freeBalance: {freeBalance !== null ? `${formatEther(freeBalance)} ETH` : "loading..."}
-        <br />
-        <small>raw: {freeBalance !== null ? freeBalance.toString() : ""}</small>
-      </p>
-
-      <div>
-        <p>commitmentsOf:</p>
-        {commitments === null && <p>loading...</p>}
-        {commitments !== null && commitments.length === 0 && <p>(none)</p>}
-        {commitments !== null && commitments.length > 0 && (
-          <ul>
-            {commitments.map((c, i) => (
-              <li key={i}>
-                {c.label} — {formatEther(c.amount)} ETH — unlocks {formatUnlockDate(c.unlockDate)} —{" "}
-                {c.released ? "released" : "held"}
-                <br />
-                <small>
-                  raw: amount={c.amount.toString()} unlockDate={c.unlockDate.toString()} released={String(c.released)}
-                </small>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {readError && <p>error: {readError}</p>}
-
-      <hr />
-
-      <form onSubmit={handleDeposit}>
-        <p>deposit</p>
-        <input
-          type="text"
-          placeholder="amount in ETH"
-          value={depositAmount}
-          onChange={(e) => setDepositAmount(e.target.value)}
+    <AnimatePresence mode="wait">
+      {view === "home" && (
+        <HomeScreen
+          key="home"
+          address={embeddedWallet.address}
+          freeBalance={freeBalance}
+          commitments={commitments}
+          phase={phase}
+          pulseKey={pulseKey}
+          readError={readError}
+          lastCommitHash={commitHash}
+          onGoCommit={() => setView("commit")}
+          onGoDeposit={() => setView("deposit")}
+          onGoSpend={() => setView("spend")}
+          onLogout={() => logout()}
         />
-        <button type="submit" disabled={depositPending}>
-          {depositPending ? "sending..." : "deposit"}
-        </button>
-        {depositHash && <p>hash: {depositHash}</p>}
-        {depositError && <p>error: {depositError}</p>}
-      </form>
+      )}
 
-      <hr />
-
-      <form onSubmit={handleCommit}>
-        <p>commit</p>
-        <input
-          type="text"
-          placeholder="amount in ETH"
-          value={commitAmount}
-          onChange={(e) => setCommitAmount(e.target.value)}
+      {view === "commit" && (
+        <CommitScreen
+          key="commit"
+          amount={commitAmount}
+          date={commitDate}
+          label={commitLabel}
+          pending={commitPending}
+          error={commitError}
+          freeBalance={freeBalance}
+          onAmount={setCommitAmount}
+          onDate={setCommitDate}
+          onLabel={setCommitLabel}
+          onSubmit={handleCommit}
+          onBack={() => setView("home")}
         />
-        <input type="date" value={commitDate} onChange={(e) => setCommitDate(e.target.value)} />
-        <input
-          type="text"
-          placeholder="label"
-          value={commitLabel}
-          onChange={(e) => setCommitLabel(e.target.value)}
-        />
-        <button type="submit" disabled={commitPending}>
-          {commitPending ? "sending..." : "commit"}
-        </button>
-        {commitHash && <p>hash: {commitHash}</p>}
-        {commitError && <p>error: {commitError}</p>}
-      </form>
+      )}
 
-      <hr />
-
-      <form onSubmit={handleSpend}>
-        <p>spendFree</p>
-        <input
-          type="text"
-          placeholder="amount in ETH"
-          value={spendAmount}
-          onChange={(e) => setSpendAmount(e.target.value)}
+      {view === "deposit" && (
+        <MoveScreen
+          key="deposit"
+          kind="deposit"
+          amount={depositAmount}
+          recipient=""
+          pending={depositPending}
+          error={depositError}
+          hash={depositHash}
+          freeBalance={freeBalance}
+          onAmount={setDepositAmount}
+          onRecipient={() => {}}
+          onSubmit={handleDeposit}
+          onBack={() => setView("home")}
         />
-        <input type="text" placeholder="to address" value={spendTo} onChange={(e) => setSpendTo(e.target.value)} />
-        <button type="submit" disabled={spendPending}>
-          {spendPending ? "sending..." : "spendFree"}
-        </button>
-        {spendBlock && (
-          <p>
-            blocked by commitment &quot;{spendBlock.label}&quot;, unlocks {formatUnlockDate(spendBlock.unlockDate)}
-            <br />
-            <small>raw unlockDate: {spendBlock.unlockDate.toString()}</small>
-          </p>
-        )}
-        {spendHash && <p>hash: {spendHash}</p>}
-        {spendError && <p>error: {spendError}</p>}
-      </form>
-    </div>
+      )}
+
+      {view === "spend" && (
+        <MoveScreen
+          key="spend"
+          kind="spend"
+          amount={spendAmount}
+          recipient={spendTo}
+          pending={spendPending}
+          error={spendError}
+          hash={spendHash}
+          freeBalance={freeBalance}
+          onAmount={setSpendAmount}
+          onRecipient={setSpendTo}
+          onSubmit={handleSpend}
+          onBack={() => setView("home")}
+        />
+      )}
+
+      {view === "refused" && spendBlock && (
+        <RefuseScreen
+          key="refused"
+          requested={spendAmount}
+          blockingLabel={spendBlock.label}
+          blockingUnlockDate={spendBlock.unlockDate}
+          freeBalance={freeBalance}
+          heldTotal={(commitments ?? [])
+            .filter((c) => !c.released)
+            .reduce((sum, c) => sum + c.amount, 0n)}
+          onAdjust={() => {
+            setSpendAmount(freeBalance === null ? "" : formatEther(freeBalance));
+            setView("spend");
+          }}
+          onBack={() => setView("home")}
+        />
+      )}
+    </AnimatePresence>
   );
 }
