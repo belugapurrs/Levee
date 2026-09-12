@@ -12,6 +12,7 @@ const publicClient = createPublicClient({
 });
 
 async function getWalletClient(wallet: ConnectedWallet) {
+  await wallet.switchChain(sepolia.id);
   const provider = await wallet.getEthereumProvider();
   return createWalletClient({
     account: wallet.address as Address,
