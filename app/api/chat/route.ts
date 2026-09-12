@@ -13,6 +13,12 @@ export const maxDuration = 30;
 const GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_TIMEOUT_MS = 20_000;
 
+// Past this much elapsed wall-clock time since the request started, there isn't enough
+// of the 30s budget left to safely attempt a tool call (network round trip) and still
+// leave room for Gemini's follow-up response — so the tool is skipped entirely rather
+// than attempted and possibly blowing the deadline.
+const TOOL_CALL_ELAPSED_BUDGET_MS = 20_000;
+
 const SAMPLE_AMOUNTS_ETH = ["0.001", "0.005", "0.01"] as const;
 
 const SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1760220/levee-sepolia/v0.0.1";
@@ -261,11 +267,11 @@ const MCP_ENTITY_FIELDS: Record<"committeds" | "releaseds" | "spents", string> =
   spents: "to amount blockTimestamp transactionHash",
 };
 
-const MCP_TIMEOUT_MS = 10_000;
-const DIRECT_SUBGRAPH_FALLBACK_TIMEOUT_MS = 8_000;
+const MCP_TIMEOUT_MS = 5_000;
+const DIRECT_SUBGRAPH_FALLBACK_TIMEOUT_MS = 5_000;
 
 /**
- * Runs the MCP tool call bounded by a hard 10s deadline. The SDK's own request options
+ * Runs the MCP tool call bounded by a hard 5s deadline. The SDK's own request options
  * only cover the post-connect `initialize`/`tools/call` messages — the transport-level
  * `connect()` (the SSE handshake) has no built-in timeout at all, which is exactly what
  * hangs in a serverless environment. `Promise.race` against our own AbortController is
@@ -354,7 +360,7 @@ async function runDirectSubgraphQuery(query: string, variables: Record<string, u
  * wallet. The model has no parameter through which it could supply its own filter or
  * address, so a call can never return another wallet's data.
  *
- * If the MCP path hangs or errors (bounded to 10s above), this falls back to the same
+ * If the MCP path hangs or errors (bounded to 5s above), this falls back to the same
  * query run as a plain HTTP request against the Subgraph directly, so a broken or slow
  * MCP connection degrades to a working answer instead of stalling the whole chat request.
  */
@@ -494,7 +500,12 @@ type GeminiPart = {
 };
 type GeminiContent = { role: string; parts: GeminiPart[] };
 
-async function askGemini(context: string, question: string, walletAddress: `0x${string}`) {
+async function askGemini(
+  context: string,
+  question: string,
+  walletAddress: `0x${string}`,
+  requestStartedAt: number
+) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured on the server.");
@@ -548,23 +559,31 @@ async function askGemini(context: string, question: string, walletAddress: `0x${
 
   let parts = await callGemini();
 
-  // Bounded, not single-shot: if the tool call errors (e.g. the subgraph isn't reachable
-  // for some reason), the model may retry once or twice with a different query before
-  // giving up and answering in text — so keep going until it stops asking for the tool.
-  const MAX_TOOL_ROUNDS = 3;
+  // Capped at 1 round, not bounded-but-open-ended: on Vercel, the 30s function budget has
+  // to cover the initial Gemini call, one tool round (network to MCP/Subgraph), and the
+  // follow-up Gemini call — a second or third round was what blew that budget before.
+  const MAX_TOOL_ROUNDS = 1;
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const functionCallPart = parts.find((p) => p.functionCall);
     if (!functionCallPart?.functionCall) break;
 
     const { name, args } = functionCallPart.functionCall;
+    const elapsedMs = Date.now() - requestStartedAt;
     let toolResult: string;
-    try {
-      toolResult =
-        name === "query_subgraph_mcp"
-          ? await callSubgraphMcp(walletAddress, args ?? {})
-          : `Unknown tool: ${name}`;
-    } catch (err) {
-      toolResult = `Tool error: ${err instanceof Error ? err.message : "unknown error"}`;
+    if (elapsedMs > TOOL_CALL_ELAPSED_BUDGET_MS) {
+      // Not enough of the 30s budget left to risk a network round trip and still leave
+      // room for Gemini's follow-up — skip the tool entirely rather than attempt it.
+      console.error(`Skipping ${name}: ${elapsedMs}ms already elapsed, over the ${TOOL_CALL_ELAPSED_BUDGET_MS}ms tool-call budget.`);
+      toolResult = "Skipped: not enough time remaining in this request. Answer from the data already provided above.";
+    } else {
+      try {
+        toolResult =
+          name === "query_subgraph_mcp"
+            ? await callSubgraphMcp(walletAddress, args ?? {})
+            : `Unknown tool: ${name}`;
+      } catch (err) {
+        toolResult = `Tool error: ${err instanceof Error ? err.message : "unknown error"}`;
+      }
     }
 
     contents.push({ role: "model", parts: [functionCallPart] });
@@ -582,6 +601,8 @@ async function askGemini(context: string, question: string, walletAddress: `0x${
 }
 
 export async function POST(request: Request) {
+  const requestStartedAt = Date.now();
+
   let body: { question?: unknown; walletAddress?: unknown };
   try {
     body = await request.json();
@@ -600,7 +621,7 @@ export async function POST(request: Request) {
 
   try {
     const context = await buildContext(walletAddress);
-    const answer = await askGemini(context, question, walletAddress);
+    const answer = await askGemini(context, question, walletAddress, requestStartedAt);
     return Response.json({ answer });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error.";
