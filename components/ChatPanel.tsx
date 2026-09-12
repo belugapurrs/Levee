@@ -35,12 +35,15 @@ function ThinkingDots() {
 
 function bubbleStyle(role: ChatMessage["role"], isError?: boolean): React.CSSProperties {
   const base: React.CSSProperties = {
-    maxWidth: "82%",
+    maxWidth: "88%",
     padding: "10px 14px",
     borderRadius: 14,
     fontSize: 14,
     lineHeight: "20px",
-    wordBreak: "break-word",
+    // `word-break: break-word` breaks mid-word even when a normal wrap at a space would
+    // fit — `overflow-wrap` only forces a break when a single token (like an address)
+    // doesn't fit on its own line, which reads much less choppy for short answer lines.
+    overflowWrap: "anywhere",
     whiteSpace: "pre-wrap",
   };
   if (role === "user") {
