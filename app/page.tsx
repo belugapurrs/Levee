@@ -2,7 +2,16 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { usePrivy, useWallets, type ConnectedWallet } from "@privy-io/react-auth";
-import { createPublicClient, createWalletClient, custom, http, parseEther, type Address, type Hash } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  formatEther,
+  http,
+  parseEther,
+  type Address,
+  type Hash,
+} from "viem";
 import { sepolia } from "viem/chains";
 import { LEVEE_ADDRESS, LEVEE_ABI } from "@/lib/leveeAbi";
 
@@ -10,6 +19,13 @@ const publicClient = createPublicClient({
   chain: sepolia,
   transport: http(),
 });
+
+type Commitment = {
+  amount: bigint;
+  unlockDate: bigint;
+  label: string;
+  released: boolean;
+};
 
 async function getWalletClient(wallet: ConnectedWallet) {
   await wallet.switchChain(sepolia.id);
@@ -21,8 +37,8 @@ async function getWalletClient(wallet: ConnectedWallet) {
   });
 }
 
-function stringifyWithBigInt(value: unknown) {
-  return JSON.stringify(value, (_key, v) => (typeof v === "bigint" ? v.toString() : v));
+function formatUnlockDate(unlockDate: bigint) {
+  return new Date(Number(unlockDate) * 1000).toLocaleString();
 }
 
 export default function Home() {
@@ -31,8 +47,8 @@ export default function Home() {
 
   const embeddedWallet = wallets.find((w) => w.walletClientType === "privy");
 
-  const [freeBalance, setFreeBalance] = useState<string | null>(null);
-  const [commitments, setCommitments] = useState<string | null>(null);
+  const [freeBalance, setFreeBalance] = useState<bigint | null>(null);
+  const [commitments, setCommitments] = useState<Commitment[] | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
 
   const refreshReads = useCallback(async () => {
@@ -46,7 +62,7 @@ export default function Home() {
         functionName: "freeBalance",
         args: [address],
       });
-      setFreeBalance(stringifyWithBigInt(result));
+      setFreeBalance(result);
     } catch (err) {
       setReadError(`freeBalance read failed: ${String(err)}`);
     }
@@ -58,7 +74,7 @@ export default function Home() {
         functionName: "commitmentsOf",
         args: [address],
       });
-      setCommitments(stringifyWithBigInt(result));
+      setCommitments(result as unknown as Commitment[]);
     } catch (err) {
       setReadError(`commitmentsOf read failed: ${String(err)}`);
     }
@@ -75,7 +91,7 @@ export default function Home() {
         functionName: "freeBalance",
         args: [address],
       })
-      .then((result) => setFreeBalance(stringifyWithBigInt(result)))
+      .then((result) => setFreeBalance(result))
       .catch((err) => setReadError(`freeBalance read failed: ${String(err)}`));
 
     publicClient
@@ -85,7 +101,7 @@ export default function Home() {
         functionName: "commitmentsOf",
         args: [address],
       })
-      .then((result) => setCommitments(stringifyWithBigInt(result)))
+      .then((result) => setCommitments(result as unknown as Commitment[]))
       .catch((err) => setReadError(`commitmentsOf read failed: ${String(err)}`));
   }, [embeddedWallet]);
 
@@ -158,7 +174,7 @@ export default function Home() {
   const [spendPending, setSpendPending] = useState(false);
   const [spendHash, setSpendHash] = useState<Hash | null>(null);
   const [spendError, setSpendError] = useState<string | null>(null);
-  const [spendBlock, setSpendBlock] = useState<{ label: string; unlockDate: string } | null>(null);
+  const [spendBlock, setSpendBlock] = useState<{ label: string; unlockDate: bigint } | null>(null);
 
   async function handleSpend(e: React.FormEvent) {
     e.preventDefault();
@@ -177,7 +193,7 @@ export default function Home() {
       })) as readonly [boolean, bigint, string, bigint];
 
       if (!allowed) {
-        setSpendBlock({ label, unlockDate: unlockDate.toString() });
+        setSpendBlock({ label, unlockDate });
         return;
       }
 
@@ -210,8 +226,33 @@ export default function Home() {
     <div>
       <p>wallet address: {embeddedWallet ? embeddedWallet.address : "no embedded wallet found"}</p>
       <button onClick={() => logout()}>Log out</button>
-      <p>freeBalance: {freeBalance ?? "loading..."}</p>
-      <p>commitmentsOf: {commitments ?? "loading..."}</p>
+
+      <p>
+        freeBalance: {freeBalance !== null ? `${formatEther(freeBalance)} ETH` : "loading..."}
+        <br />
+        <small>raw: {freeBalance !== null ? freeBalance.toString() : ""}</small>
+      </p>
+
+      <div>
+        <p>commitmentsOf:</p>
+        {commitments === null && <p>loading...</p>}
+        {commitments !== null && commitments.length === 0 && <p>(none)</p>}
+        {commitments !== null && commitments.length > 0 && (
+          <ul>
+            {commitments.map((c, i) => (
+              <li key={i}>
+                {c.label} — {formatEther(c.amount)} ETH — unlocks {formatUnlockDate(c.unlockDate)} —{" "}
+                {c.released ? "released" : "held"}
+                <br />
+                <small>
+                  raw: amount={c.amount.toString()} unlockDate={c.unlockDate.toString()} released={String(c.released)}
+                </small>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       {readError && <p>error: {readError}</p>}
 
       <hr />
@@ -271,7 +312,9 @@ export default function Home() {
         </button>
         {spendBlock && (
           <p>
-            blocked by commitment &quot;{spendBlock.label}&quot;, unlocks at {spendBlock.unlockDate}
+            blocked by commitment &quot;{spendBlock.label}&quot;, unlocks {formatUnlockDate(spendBlock.unlockDate)}
+            <br />
+            <small>raw unlockDate: {spendBlock.unlockDate.toString()}</small>
           </p>
         )}
         {spendHash && <p>hash: {spendHash}</p>}
