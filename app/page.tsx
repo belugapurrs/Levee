@@ -15,9 +15,26 @@ import {
 } from "viem";
 import { sepolia } from "viem/chains";
 import { LEVEE_ADDRESS, LEVEE_ABI } from "@/lib/leveeAbi";
-import { screenTransition } from "@/components/motion";
-import type { LeveePhase } from "@/components/LeveeVisual";
-import { CommitScreen, HomeScreen, MoveScreen, RefuseScreen, type Commitment } from "@/components/screens";
+import { dateInputToTimestamp, formatDate } from "@/lib/dates";
+import { Button, screenMotion } from "@/components/ui";
+import type { FlowPhase } from "@/components/FlowChannel";
+import {
+  ActivityScreen,
+  BottomNav,
+  HoldsScreen,
+  HomeScreen,
+  SettingsScreen,
+  type Commitment,
+  type Tab,
+} from "@/components/screens/Home";
+import {
+  AddMoneyScreen,
+  BlockedScreen,
+  HoldMoneyScreen,
+  HoldSuccessScreen,
+  SentScreen,
+  SpendScreen,
+} from "@/components/screens/Flows";
 
 const publicClient = createPublicClient({
   chain: sepolia,
@@ -34,14 +51,7 @@ async function getWalletClient(wallet: ConnectedWallet) {
   });
 }
 
-// `new Date("2026-12-02")` parses date-only strings as UTC midnight, which lands on a
-// different day/time locally. Build the date from parts so it is local midnight.
-function dateInputToTimestamp(dateInput: string) {
-  const [year, month, day] = dateInput.split("-").map(Number);
-  return BigInt(Math.floor(new Date(year, month - 1, day).getTime() / 1000));
-}
-
-type View = "home" | "commit" | "deposit" | "spend" | "refused";
+type Overlay = null | "hold" | "spend" | "add" | "blocked" | "holdDone" | "sent";
 
 export default function Home() {
   const { ready, authenticated, login, logout } = usePrivy();
@@ -53,9 +63,16 @@ export default function Home() {
   const [commitments, setCommitments] = useState<Commitment[] | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
 
-  const [view, setView] = useState<View>("home");
-  const [phase, setPhase] = useState<LeveePhase>("idle");
-  const [pulseKey, setPulseKey] = useState(0);
+  const [tab, setTab] = useState<Tab>("home");
+  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [flowPhase, setFlowPhase] = useState<FlowPhase>("idle");
+  const [sessionTx, setSessionTx] = useState<{ kind: string; hash: string }[]>([]);
+  const [lastHold, setLastHold] = useState({ amount: "", date: "" });
+  const [lastSpend, setLastSpend] = useState("");
+
+  const heldTotal = (commitments ?? [])
+    .filter((c) => !c.released)
+    .reduce((sum, c) => sum + c.amount, 0n);
 
   const refreshReads = useCallback(async () => {
     if (!embeddedWallet) return;
@@ -114,14 +131,12 @@ export default function Home() {
   // deposit()
   const [depositAmount, setDepositAmount] = useState("");
   const [depositPending, setDepositPending] = useState(false);
-  const [depositHash, setDepositHash] = useState<Hash | null>(null);
   const [depositError, setDepositError] = useState<string | null>(null);
 
   async function handleDeposit(e: React.FormEvent) {
     e.preventDefault();
     if (!embeddedWallet) return;
     setDepositPending(true);
-    setDepositHash(null);
     setDepositError(null);
     try {
       const walletClient = await getWalletClient(embeddedWallet);
@@ -132,10 +147,12 @@ export default function Home() {
         value: parseEther(depositAmount),
       });
       await publicClient.waitForTransactionReceipt({ hash });
-      setDepositHash(hash);
       await refreshReads();
+      setSessionTx((t) => [{ kind: "added money", hash }, ...t]);
       setDepositAmount("");
-      setView("home");
+      setOverlay(null);
+      setTab("home");
+      setFlowPhase("idle");
     } catch (err) {
       setDepositError(String(err));
     } finally {
@@ -168,13 +185,17 @@ export default function Home() {
       await publicClient.waitForTransactionReceipt({ hash });
       setCommitHash(hash);
       await refreshReads();
+      setSessionTx((t) => [{ kind: "held money", hash }, ...t]);
+      setLastHold({
+        amount: formatEther(parseEther(commitAmount)),
+        date: formatDate(dateInputToTimestamp(commitDate)),
+      });
       setCommitAmount("");
       setCommitDate("");
       setCommitLabel("");
-      setPulseKey((k) => k + 1);
-      setPhase("sealing");
-      setView("home");
-      window.setTimeout(() => setPhase("idle"), 1400);
+      setFlowPhase("holding");
+      setOverlay("holdDone");
+      window.setTimeout(() => setFlowPhase("idle"), 1200);
     } catch (err) {
       setCommitError(String(err));
     } finally {
@@ -208,7 +229,8 @@ export default function Home() {
 
       if (!allowed) {
         setSpendBlock({ label, unlockDate });
-        setView("refused");
+        setFlowPhase("blocked");
+        setOverlay("blocked");
         return;
       }
 
@@ -222,8 +244,12 @@ export default function Home() {
       await publicClient.waitForTransactionReceipt({ hash });
       setSpendHash(hash);
       await refreshReads();
+      setSessionTx((t) => [{ kind: "sent", hash }, ...t]);
+      setLastSpend(formatEther(amountWei));
       setSpendAmount("");
-      setView("home");
+      setFlowPhase("spending");
+      setOverlay("sent");
+      window.setTimeout(() => setFlowPhase("idle"), 1200);
     } catch (err) {
       setSpendError(String(err));
     } finally {
@@ -233,26 +259,24 @@ export default function Home() {
 
   if (!ready) {
     return (
-      <div className="center">
-        <span className="wordmark">Levee</span>
+      <div className="center-state">
+        <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "0.12em" }}>LEVEE</div>
       </div>
     );
   }
 
   if (!authenticated) {
     return (
-      <motion.div className="center" {...screenTransition}>
-        <span className="wordmark">Levee</span>
-        <h1 className="display" style={{ maxWidth: "14ch" }}>
-          Money that stays put.
+      <motion.div className="center-state" {...screenMotion}>
+        <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", marginBottom: 8 }}>LEVEE</div>
+        <h1 className="title" style={{ maxWidth: 320 }}>
+          Know what&apos;s safe to spend
         </h1>
-        <p className="serif-note" style={{ maxWidth: "34ch" }}>
-          Name an amount, name a date. It will not move until then — not for anyone, including you.
+        <p className="body" style={{ maxWidth: 340 }}>
+          Set money aside for what&apos;s coming. Levee keeps it out of reach until the date you choose.
         </p>
-        <div style={{ width: "min(22rem, 100%)", marginTop: "0.5rem" }}>
-          <button className="btn" onClick={login}>
-            Continue
-          </button>
+        <div style={{ width: "min(340px, 100%)", marginTop: 16 }}>
+          <Button onClick={login}>Get started</Button>
         </div>
       </motion.div>
     );
@@ -260,100 +284,141 @@ export default function Home() {
 
   if (!embeddedWallet) {
     return (
-      <div className="center">
-        <span className="wordmark">Levee</span>
-        <p className="serif-note">Setting up your wallet…</p>
+      <div className="center-state">
+        <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "0.12em" }}>LEVEE</div>
+        <p className="body">Setting up your wallet…</p>
       </div>
     );
   }
 
+  const address = embeddedWallet.address;
+
   return (
-    <AnimatePresence mode="wait">
-      {view === "home" && (
-        <HomeScreen
-          key="home"
-          address={embeddedWallet.address}
-          freeBalance={freeBalance}
-          commitments={commitments}
-          phase={phase}
-          pulseKey={pulseKey}
-          readError={readError}
-          lastCommitHash={commitHash}
-          onGoCommit={() => setView("commit")}
-          onGoDeposit={() => setView("deposit")}
-          onGoSpend={() => setView("spend")}
-          onLogout={() => logout()}
-        />
-      )}
+    <>
+      <AnimatePresence mode="wait">
+        {overlay === null && tab === "home" && (
+          <HomeScreen
+            key="home"
+            address={address}
+            freeBalance={freeBalance}
+            commitments={commitments}
+            phase={flowPhase}
+            readError={readError}
+            onHold={() => setOverlay("hold")}
+            onSpend={() => setOverlay("spend")}
+            onAdd={() => setOverlay("add")}
+            onViewAll={() => setTab("holds")}
+            onOpenWallet={() => setTab("settings")}
+          />
+        )}
 
-      {view === "commit" && (
-        <CommitScreen
-          key="commit"
-          amount={commitAmount}
-          date={commitDate}
-          label={commitLabel}
-          pending={commitPending}
-          error={commitError}
-          freeBalance={freeBalance}
-          onAmount={setCommitAmount}
-          onDate={setCommitDate}
-          onLabel={setCommitLabel}
-          onSubmit={handleCommit}
-          onBack={() => setView("home")}
-        />
-      )}
+        {overlay === null && tab === "holds" && (
+          <HoldsScreen
+            key="holds"
+            commitments={commitments}
+            onBack={() => setTab("home")}
+            onHold={() => setOverlay("hold")}
+          />
+        )}
 
-      {view === "deposit" && (
-        <MoveScreen
-          key="deposit"
-          kind="deposit"
-          amount={depositAmount}
-          recipient=""
-          pending={depositPending}
-          error={depositError}
-          hash={depositHash}
-          freeBalance={freeBalance}
-          onAmount={setDepositAmount}
-          onRecipient={() => {}}
-          onSubmit={handleDeposit}
-          onBack={() => setView("home")}
-        />
-      )}
+        {overlay === null && tab === "activity" && (
+          <ActivityScreen key="activity" commitments={commitments} sessionTx={sessionTx} />
+        )}
 
-      {view === "spend" && (
-        <MoveScreen
-          key="spend"
-          kind="spend"
-          amount={spendAmount}
-          recipient={spendTo}
-          pending={spendPending}
-          error={spendError}
-          hash={spendHash}
-          freeBalance={freeBalance}
-          onAmount={setSpendAmount}
-          onRecipient={setSpendTo}
-          onSubmit={handleSpend}
-          onBack={() => setView("home")}
-        />
-      )}
+        {overlay === null && tab === "settings" && (
+          <SettingsScreen key="settings" address={address} onLogout={() => logout()} />
+        )}
 
-      {view === "refused" && spendBlock && (
-        <RefuseScreen
-          key="refused"
-          requested={spendAmount}
-          blockingLabel={spendBlock.label}
-          blockingUnlockDate={spendBlock.unlockDate}
-          freeBalance={freeBalance}
-          heldTotal={(commitments ?? [])
-            .filter((c) => !c.released)
-            .reduce((sum, c) => sum + c.amount, 0n)}
-          onAdjust={() => {
-            setSpendAmount(freeBalance === null ? "" : formatEther(freeBalance));
-            setView("spend");
-          }}
-          onBack={() => setView("home")}
-        />
-      )}
-    </AnimatePresence>
+        {overlay === "hold" && (
+          <HoldMoneyScreen
+            key="hold"
+            amount={commitAmount}
+            date={commitDate}
+            label={commitLabel}
+            pending={commitPending}
+            error={commitError}
+            freeBalance={freeBalance}
+            onAmount={setCommitAmount}
+            onDate={setCommitDate}
+            onLabel={setCommitLabel}
+            onSubmit={handleCommit}
+            onBack={() => setOverlay(null)}
+          />
+        )}
+
+        {overlay === "spend" && (
+          <SpendScreen
+            key="spend"
+            amount={spendAmount}
+            recipient={spendTo}
+            pending={spendPending}
+            error={spendError}
+            freeBalance={freeBalance}
+            heldTotal={heldTotal}
+            onAmount={setSpendAmount}
+            onRecipient={setSpendTo}
+            onSubmit={handleSpend}
+            onBack={() => setOverlay(null)}
+          />
+        )}
+
+        {overlay === "add" && (
+          <AddMoneyScreen
+            key="add"
+            amount={depositAmount}
+            pending={depositPending}
+            error={depositError}
+            onAmount={setDepositAmount}
+            onSubmit={handleDeposit}
+            onBack={() => setOverlay(null)}
+          />
+        )}
+
+        {overlay === "blocked" && spendBlock && (
+          <BlockedScreen
+            key="blocked"
+            requested={spendAmount}
+            freeBalance={freeBalance}
+            heldTotal={heldTotal}
+            onEdit={() => {
+              setFlowPhase("idle");
+              setOverlay("spend");
+            }}
+            onViewHolds={() => {
+              setFlowPhase("idle");
+              setOverlay(null);
+              setTab("holds");
+            }}
+          />
+        )}
+
+        {overlay === "holdDone" && (
+          <HoldSuccessScreen
+            key="holdDone"
+            amount={lastHold.amount}
+            unlockDate={lastHold.date}
+            hash={commitHash}
+            onHome={() => {
+              setOverlay(null);
+              setTab("home");
+            }}
+          />
+        )}
+
+        {overlay === "sent" && (
+          <SentScreen
+            key="sent"
+            amount={lastSpend}
+            hash={spendHash}
+            onHome={() => {
+              setOverlay(null);
+              setTab("home");
+            }}
+          />
+        )}
+      </AnimatePresence>
+
+      {overlay === null && <BottomNav tab={tab} onTab={setTab} />}
+    </>
   );
 }
