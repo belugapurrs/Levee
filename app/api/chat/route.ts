@@ -5,6 +5,14 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { LEVEE_ABI, LEVEE_ADDRESS } from "@/lib/leveeAbi";
 import { formatDate } from "@/lib/dates";
 
+// Vercel's default function timeout is 300s, which is far too long to let a hung Gemini
+// call sit before the platform kills it — cap it much lower so a stuck request fails fast
+// with a real error instead of a silent 300s timeout.
+export const maxDuration = 30;
+
+const GEMINI_MODEL = "gemini-3.6-flash";
+const GEMINI_TIMEOUT_MS = 20_000;
+
 const SAMPLE_AMOUNTS_ETH = ["0.001", "0.005", "0.01"] as const;
 
 const SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1760220/levee-sepolia/v0.0.1";
@@ -423,7 +431,7 @@ async function askGemini(context: string, question: string, walletAddress: `0x${
     throw new Error("GEMINI_API_KEY is not configured on the server.");
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
   const contents: GeminiContent[] = [
     {
@@ -433,17 +441,36 @@ async function askGemini(context: string, question: string, walletAddress: `0x${
   ];
 
   const callGemini = async () => {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-        tools: [{ functionDeclarations: [MCP_TOOL_DECLARATION] }],
-        contents,
-      }),
-    });
+    // A hung Gemini call must never be allowed to ride out Vercel's full function timeout —
+    // abort it ourselves well before that so the route always returns a real JSON error.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+          tools: [{ functionDeclarations: [MCP_TOOL_DECLARATION] }],
+          contents,
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        console.error(`Gemini API request timed out after ${GEMINI_TIMEOUT_MS}ms (model=${GEMINI_MODEL}).`);
+        throw new Error(`Gemini API request timed out after ${GEMINI_TIMEOUT_MS / 1000}s.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
+      console.error(`Gemini API request failed: status=${res.status} model=${GEMINI_MODEL} body=${detail || res.statusText}`);
       throw new Error(`Gemini API request failed (${res.status}): ${detail || res.statusText}`);
     }
     const data = await res.json();
