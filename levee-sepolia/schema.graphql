@@ -1,0 +1,40 @@
+type Committed @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  commitmentId: BigInt! # uint256
+  amount: BigInt! # uint256
+  unlockDate: BigInt! # uint256
+  label: String! # string
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type Deposited @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  amount: BigInt! # uint256
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type Released @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  commitmentId: BigInt! # uint256
+  amount: BigInt! # uint256
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
+
+type Spent @entity(immutable: true) {
+  id: Bytes!
+  user: Bytes! # address
+  to: Bytes! # address
+  amount: BigInt! # uint256
+  blockNumber: BigInt!
+  blockTimestamp: BigInt!
+  transactionHash: Bytes!
+}
