@@ -5,6 +5,62 @@ import { formatDate } from "@/lib/dates";
 
 const SAMPLE_AMOUNTS_ETH = ["0.001", "0.005", "0.01"] as const;
 
+const SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1760220/levee-sepolia/v0.0.1";
+
+const HISTORY_QUERY = `
+  query History($user: Bytes!) {
+    committeds(where: { user: $user }, orderBy: blockTimestamp, orderDirection: desc, first: 10) {
+      commitmentId
+      amount
+      unlockDate
+      label
+      blockTimestamp
+      transactionHash
+    }
+    releaseds(where: { user: $user }, orderBy: blockTimestamp, orderDirection: desc, first: 10) {
+      commitmentId
+      amount
+      blockTimestamp
+      transactionHash
+    }
+    spents(where: { user: $user }, orderBy: blockTimestamp, orderDirection: desc, first: 10) {
+      to
+      amount
+      blockTimestamp
+      transactionHash
+    }
+  }
+`;
+
+type SubgraphCommitted = {
+  commitmentId: string;
+  amount: string;
+  unlockDate: string;
+  label: string;
+  blockTimestamp: string;
+  transactionHash: string;
+};
+
+type SubgraphReleased = {
+  commitmentId: string;
+  amount: string;
+  blockTimestamp: string;
+  transactionHash: string;
+};
+
+type SubgraphSpent = {
+  to: string;
+  amount: string;
+  blockTimestamp: string;
+  transactionHash: string;
+};
+
+type SubgraphHistory = {
+  committeds: SubgraphCommitted[];
+  releaseds: SubgraphReleased[];
+  spents: SubgraphSpent[];
+};
+
 const SYSTEM_INSTRUCTION =
   "You are Levee, a calm financial assistant. Answer only from the data provided. " +
   "Use the user's real numbers and commitment names. Never invent data. Be concise and reassuring.";
@@ -14,7 +70,31 @@ const client = createPublicClient({
   transport: http(),
 });
 
+/**
+ * Subgraph indexing lag or an outage shouldn't take down the whole chat feature —
+ * the live contract reads below are the source of truth for current state, so a
+ * failed history fetch just means the context omits the historical section.
+ */
+async function fetchHistory(walletAddress: `0x${string}`): Promise<SubgraphHistory | null> {
+  try {
+    const res = await fetch(SUBGRAPH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: HISTORY_QUERY, variables: { user: walletAddress.toLowerCase() } }),
+    });
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    if (json.errors || !json.data) return null;
+    return json.data as SubgraphHistory;
+  } catch {
+    return null;
+  }
+}
+
 async function buildContext(walletAddress: `0x${string}`) {
+  const historyPromise = fetchHistory(walletAddress);
+
   const [freeBalance, commitments] = await Promise.all([
     client.readContract({
       address: LEVEE_ADDRESS,
@@ -69,6 +149,45 @@ async function buildContext(walletAddress: `0x${string}`) {
   lines.push("Spendability check for sample amounts:");
   for (const { ethAmount, allowed } of spendChecks) {
     lines.push(`- ${ethAmount} ETH: ${allowed ? "spendable now" : "blocked by a hold"}.`);
+  }
+
+  const history = await historyPromise;
+  if (!history) {
+    lines.push("Historical on-chain event data is temporarily unavailable.");
+  } else {
+    const { committeds, releaseds, spents } = history;
+
+    lines.push("Recent commit history (most recent first, from indexed events):");
+    if (committeds.length === 0) {
+      lines.push("- No commit events found.");
+    } else {
+      for (const c of committeds) {
+        lines.push(
+          `- Committed ${formatEther(BigInt(c.amount))} ETH labeled "${c.label}" on ` +
+            `${formatDate(BigInt(c.blockTimestamp))}, unlocking ${formatDate(BigInt(c.unlockDate))}.`
+        );
+      }
+    }
+
+    lines.push("Recent release history (most recent first, from indexed events):");
+    if (releaseds.length === 0) {
+      lines.push("- No release events found.");
+    } else {
+      for (const r of releaseds) {
+        lines.push(`- Released ${formatEther(BigInt(r.amount))} ETH on ${formatDate(BigInt(r.blockTimestamp))}.`);
+      }
+    }
+
+    lines.push("Recent spend history (most recent first, from indexed events):");
+    if (spents.length === 0) {
+      lines.push("- No spend events found.");
+    } else {
+      const totalSpent = spents.reduce((sum, s) => sum + BigInt(s.amount), 0n);
+      lines.push(`- Total spent across these events: ${formatEther(totalSpent)} ETH.`);
+      for (const s of spents) {
+        lines.push(`- Spent ${formatEther(BigInt(s.amount))} ETH to ${s.to} on ${formatDate(BigInt(s.blockTimestamp))}.`);
+      }
+    }
   }
 
   return lines.join("\n");
