@@ -37,6 +37,7 @@ import {
   SentScreen,
   SpendScreen,
 } from "@/components/screens/Flows";
+import { ChatPanel } from "@/components/ChatPanel";
 
 const publicClient = createPublicClient({
   chain: sepolia,
@@ -575,6 +576,7 @@ export default function Home() {
         )}
       </AnimatePresence>
 
+      {overlay === null && <ChatPanel />}
       {overlay === null && <BottomNav tab={tab} onTab={setTab} />}
     </>
   );
