@@ -3,7 +3,6 @@ export const LEVEE_ADDRESS = "0x736EBbB005de7b594DD082D026fa4e088e16d58E";
 export const LEVEE_CHAIN_ID = 11155111; // Ethereum Sepolia
 
 export const LEVEE_ABI = [
-[
 	{
 		"inputs": [],
 		"name": "AlreadyReleased",
@@ -354,4 +353,4 @@ export const LEVEE_ABI = [
 		"stateMutability": "view",
 		"type": "function"
 	}
-]] as const;
+] as const;
