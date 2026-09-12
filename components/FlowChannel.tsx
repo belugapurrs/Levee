@@ -4,6 +4,33 @@ import { motion, useReducedMotion } from "framer-motion";
 
 export type FlowPhase = "idle" | "adding" | "holding" | "spending" | "releasing" | "blocked";
 
+/**
+ * A continuous, very low-opacity sheen drifting left → right inside the Available fill.
+ * Unlike the transactional particles below, this always runs — it reads as the same
+ * money quietly moving toward the boundary, not as a state change, so it stays subtle
+ * and never competes with the one-shot bursts.
+ */
+function AmbientFlow() {
+  return (
+    <motion.div
+      aria-hidden
+      style={{
+        position: "absolute",
+        top: 0,
+        bottom: 0,
+        width: "45%",
+        background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.24), transparent)",
+        filter: "blur(7px)",
+        mixBlendMode: "screen",
+        pointerEvents: "none",
+      }}
+      initial={{ left: "-45%" }}
+      animate={{ left: "100%" }}
+      transition={{ duration: 7, repeat: Infinity, repeatType: "loop", ease: "easeInOut" }}
+    />
+  );
+}
+
 type Particle = { top: number; delay: number };
 
 const PARTICLES: Particle[] = [
@@ -129,6 +156,7 @@ export function FlowChannel({
           background: "var(--blue)",
         }}
       >
+        {!reduced && hasMoney && <AmbientFlow />}
         {!reduced && hasMoney && phase !== "idle" && (
           <TransientParticles phase={phase} availablePct={availablePct} />
         )}
