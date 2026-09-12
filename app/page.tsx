@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePrivy, useWallets, type ConnectedWallet } from "@privy-io/react-auth";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -16,7 +16,8 @@ import {
 import { sepolia } from "viem/chains";
 import { LEVEE_ADDRESS, LEVEE_ABI } from "@/lib/leveeAbi";
 import { dateInputToTimestamp, formatDate } from "@/lib/dates";
-import { Button, screenMotion } from "@/components/ui";
+import type { ActivityEvent } from "@/lib/activity";
+import { Button, eth, screenMotion } from "@/components/ui";
 import type { FlowPhase } from "@/components/FlowChannel";
 import {
   ActivityScreen,
@@ -30,6 +31,7 @@ import {
 import {
   AddMoneyScreen,
   BlockedScreen,
+  HoldDetailScreen,
   HoldMoneyScreen,
   HoldSuccessScreen,
   SentScreen,
@@ -51,7 +53,20 @@ async function getWalletClient(wallet: ConnectedWallet) {
   });
 }
 
-type Overlay = null | "hold" | "spend" | "add" | "blocked" | "holdDone" | "sent";
+/**
+ * `waitForTransactionReceipt` resolves once a transaction is mined regardless of
+ * whether it succeeded or reverted on-chain — it does not throw on revert. Every
+ * write in this app must check `status` itself, or a reverted transaction (e.g. a
+ * race against another commit) would be reported to the user as a success.
+ */
+async function assertMined(hash: Hash) {
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  if (receipt.status === "reverted") {
+    throw new Error("Transaction reverted on-chain.");
+  }
+}
+
+type Overlay = null | "hold" | "spend" | "add" | "blocked" | "holdDone" | "sent" | "holdDetail";
 
 export default function Home() {
   const { ready, authenticated, login, logout } = usePrivy();
@@ -67,9 +82,17 @@ export default function Home() {
   const [tab, setTab] = useState<Tab>("home");
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [flowPhase, setFlowPhase] = useState<FlowPhase>("idle");
-  const [sessionTx, setSessionTx] = useState<{ kind: string; hash: string }[]>([]);
   const [lastHold, setLastHold] = useState({ amount: "", date: "" });
   const [lastSpend, setLastSpend] = useState("");
+  const [selectedHoldIndex, setSelectedHoldIndex] = useState<number | null>(null);
+  const [commitTxByIndex, setCommitTxByIndex] = useState<Record<number, Hash>>({});
+
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const activityIdRef = useRef(0);
+  const pushActivity = useCallback((event: Omit<ActivityEvent, "id" | "at">) => {
+    activityIdRef.current += 1;
+    setActivity((prev) => [{ ...event, id: `evt-${activityIdRef.current}`, at: Date.now() }, ...prev]);
+  }, []);
 
   const heldTotal = (commitments ?? [])
     .filter((c) => !c.released)
@@ -141,6 +164,11 @@ export default function Home() {
       .catch((err) => setReadError(`wallet balance read failed: ${String(err)}`));
   }, [embeddedWallet]);
 
+  function flashPhase(phase: FlowPhase) {
+    setFlowPhase(phase);
+    window.setTimeout(() => setFlowPhase("idle"), 1200);
+  }
+
   // deposit()
   const [depositAmount, setDepositAmount] = useState("");
   const [depositPending, setDepositPending] = useState(false);
@@ -151,23 +179,34 @@ export default function Home() {
     if (!embeddedWallet) return;
     setDepositPending(true);
     setDepositError(null);
+    const amountLabel = depositAmount;
+    let hash: Hash | null = null;
     try {
       const walletClient = await getWalletClient(embeddedWallet);
-      const hash = await walletClient.writeContract({
+      hash = await walletClient.writeContract({
         address: LEVEE_ADDRESS as Address,
         abi: LEVEE_ABI,
         functionName: "deposit",
-        value: parseEther(depositAmount),
+        value: parseEther(amountLabel),
       });
-      await publicClient.waitForTransactionReceipt({ hash });
+      await assertMined(hash);
       await refreshReads();
-      setSessionTx((t) => [{ kind: "added money", hash }, ...t]);
+      pushActivity({ kind: "added", action: "add", amount: amountLabel, hash, status: "confirmed" });
       setDepositAmount("");
       setOverlay(null);
       setTab("home");
-      setFlowPhase("idle");
+      flashPhase("adding");
     } catch (err) {
       setDepositError(String(err));
+      pushActivity({
+        kind: "failed",
+        action: "add",
+        amount: amountLabel,
+        hash,
+        status: "failed",
+        errorMessage: String(err),
+      });
+      if (hash) await refreshReads();
     } finally {
       setDepositPending(false);
     }
@@ -187,30 +226,58 @@ export default function Home() {
     setCommitPending(true);
     setCommitHash(null);
     setCommitError(null);
+    const amountLabel = commitAmount;
+    const labelText = commitLabel;
+    const unlockTs = dateInputToTimestamp(commitDate);
+    let hash: Hash | null = null;
     try {
       const walletClient = await getWalletClient(embeddedWallet);
-      const hash = await walletClient.writeContract({
+      hash = await walletClient.writeContract({
         address: LEVEE_ADDRESS as Address,
         abi: LEVEE_ABI,
         functionName: "commit",
-        args: [parseEther(commitAmount), dateInputToTimestamp(commitDate), commitLabel],
+        args: [parseEther(amountLabel), unlockTs, labelText],
       });
-      await publicClient.waitForTransactionReceipt({ hash });
+      await assertMined(hash);
       setCommitHash(hash);
+
+      const freshCommitments = (await publicClient.readContract({
+        address: LEVEE_ADDRESS as Address,
+        abi: LEVEE_ABI,
+        functionName: "commitmentsOf",
+        args: [embeddedWallet.address as Address],
+      })) as unknown as Commitment[];
+      const newIndex = freshCommitments.length - 1;
+      setCommitments(freshCommitments);
+      setCommitTxByIndex((prev) => ({ ...prev, [newIndex]: hash as Hash }));
       await refreshReads();
-      setSessionTx((t) => [{ kind: "held money", hash }, ...t]);
-      setLastHold({
-        amount: formatEther(parseEther(commitAmount)),
-        date: formatDate(dateInputToTimestamp(commitDate)),
+
+      pushActivity({
+        kind: "held",
+        action: "hold",
+        amount: amountLabel,
+        label: labelText,
+        hash,
+        status: "confirmed",
       });
+      setLastHold({ amount: formatEther(parseEther(amountLabel)), date: formatDate(unlockTs) });
       setCommitAmount("");
       setCommitDate("");
       setCommitLabel("");
-      setFlowPhase("holding");
       setOverlay("holdDone");
-      window.setTimeout(() => setFlowPhase("idle"), 1200);
+      flashPhase("holding");
     } catch (err) {
       setCommitError(String(err));
+      pushActivity({
+        kind: "failed",
+        action: "hold",
+        amount: amountLabel,
+        label: labelText,
+        hash,
+        status: "failed",
+        errorMessage: String(err),
+      });
+      if (hash) await refreshReads();
     } finally {
       setCommitPending(false);
     }
@@ -231,8 +298,10 @@ export default function Home() {
     setSpendHash(null);
     setSpendError(null);
     setSpendBlock(null);
+    const amountLabel = spendAmount;
+    let hash: Hash | null = null;
     try {
-      const amountWei = parseEther(spendAmount);
+      const amountWei = parseEther(amountLabel);
       const [allowed, , label, unlockDate] = (await publicClient.readContract({
         address: LEVEE_ADDRESS as Address,
         abi: LEVEE_ABI,
@@ -242,31 +311,87 @@ export default function Home() {
 
       if (!allowed) {
         setSpendBlock({ label, unlockDate });
-        setFlowPhase("blocked");
         setOverlay("blocked");
+        setFlowPhase("blocked");
         return;
       }
 
       const walletClient = await getWalletClient(embeddedWallet);
-      const hash = await walletClient.writeContract({
+      hash = await walletClient.writeContract({
         address: LEVEE_ADDRESS as Address,
         abi: LEVEE_ABI,
         functionName: "spendFree",
         args: [amountWei, spendTo as Address],
       });
-      await publicClient.waitForTransactionReceipt({ hash });
+      await assertMined(hash);
       setSpendHash(hash);
       await refreshReads();
-      setSessionTx((t) => [{ kind: "sent", hash }, ...t]);
+      pushActivity({ kind: "sent", action: "spend", amount: amountLabel, hash, status: "confirmed" });
       setLastSpend(formatEther(amountWei));
       setSpendAmount("");
-      setFlowPhase("spending");
       setOverlay("sent");
-      window.setTimeout(() => setFlowPhase("idle"), 1200);
+      flashPhase("spending");
     } catch (err) {
       setSpendError(String(err));
+      pushActivity({
+        kind: "failed",
+        action: "spend",
+        amount: amountLabel,
+        hash,
+        status: "failed",
+        errorMessage: String(err),
+      });
+      if (hash) await refreshReads();
     } finally {
       setSpendPending(false);
+    }
+  }
+
+  // release(commitmentId)
+  const [releasePending, setReleasePending] = useState(false);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
+
+  async function handleRelease(index: number) {
+    if (!embeddedWallet) return;
+    const commitment = commitments?.[index];
+    if (!commitment) return;
+    setReleasePending(true);
+    setReleaseError(null);
+    let hash: Hash | null = null;
+    try {
+      const walletClient = await getWalletClient(embeddedWallet);
+      hash = await walletClient.writeContract({
+        address: LEVEE_ADDRESS as Address,
+        abi: LEVEE_ABI,
+        functionName: "release",
+        args: [BigInt(index)],
+      });
+      await assertMined(hash);
+      await refreshReads();
+      pushActivity({
+        kind: "released",
+        action: "release",
+        amount: eth(commitment.amount),
+        label: commitment.label,
+        hash,
+        status: "confirmed",
+      });
+      setOverlay(null);
+      flashPhase("releasing");
+    } catch (err) {
+      setReleaseError(String(err));
+      pushActivity({
+        kind: "failed",
+        action: "release",
+        amount: eth(commitment.amount),
+        label: commitment.label,
+        hash,
+        status: "failed",
+        errorMessage: String(err),
+      });
+      if (hash) await refreshReads();
+    } finally {
+      setReleasePending(false);
     }
   }
 
@@ -305,6 +430,7 @@ export default function Home() {
   }
 
   const address = embeddedWallet.address;
+  const selectedHold = selectedHoldIndex !== null ? commitments?.[selectedHoldIndex] ?? null : null;
 
   return (
     <>
@@ -314,7 +440,6 @@ export default function Home() {
             key="home"
             address={address}
             freeBalance={freeBalance}
-            walletBalance={walletBalance}
             commitments={commitments}
             phase={flowPhase}
             readError={readError}
@@ -332,15 +457,30 @@ export default function Home() {
             commitments={commitments}
             onBack={() => setTab("home")}
             onHold={() => setOverlay("hold")}
+            onSelect={(index) => {
+              setSelectedHoldIndex(index);
+              setReleaseError(null);
+              setOverlay("holdDetail");
+            }}
           />
         )}
 
-        {overlay === null && tab === "activity" && (
-          <ActivityScreen key="activity" commitments={commitments} sessionTx={sessionTx} />
-        )}
+        {overlay === null && tab === "activity" && <ActivityScreen key="activity" events={activity} />}
 
         {overlay === null && tab === "settings" && (
           <SettingsScreen key="settings" address={address} onLogout={() => logout()} />
+        )}
+
+        {overlay === "holdDetail" && selectedHold && selectedHoldIndex !== null && (
+          <HoldDetailScreen
+            key="holdDetail"
+            commitment={selectedHold}
+            hash={commitTxByIndex[selectedHoldIndex] ?? null}
+            pending={releasePending}
+            error={releaseError}
+            onRelease={() => handleRelease(selectedHoldIndex)}
+            onBack={() => setOverlay(null)}
+          />
         )}
 
         {overlay === "hold" && (
@@ -382,6 +522,9 @@ export default function Home() {
             amount={depositAmount}
             pending={depositPending}
             error={depositError}
+            walletBalance={walletBalance}
+            freeBalance={freeBalance}
+            heldTotal={heldTotal}
             onAmount={setDepositAmount}
             onSubmit={handleDeposit}
             onBack={() => setOverlay(null)}

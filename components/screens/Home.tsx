@@ -12,11 +12,13 @@ import {
   LockKeyhole,
   Plus,
   Settings as SettingsIcon,
+  TriangleAlert,
   Wallet,
 } from "lucide-react";
 import { AnimatedEth, Button, eth, screenMotion, toNumber } from "@/components/ui";
 import { FlowChannel, type FlowPhase } from "@/components/FlowChannel";
-import { formatDate } from "@/lib/dates";
+import { daysRemaining, formatDate } from "@/lib/dates";
+import type { ActivityEvent } from "@/lib/activity";
 
 export type Commitment = {
   amount: bigint;
@@ -129,7 +131,6 @@ function HoldRow({
 export function HomeScreen({
   address,
   freeBalance,
-  walletBalance,
   commitments,
   phase,
   readError,
@@ -141,7 +142,6 @@ export function HomeScreen({
 }: {
   address: string;
   freeBalance: bigint | null;
-  walletBalance: bigint | null;
   commitments: Commitment[] | null;
   phase: FlowPhase;
   readError: string | null;
@@ -157,6 +157,11 @@ export function HomeScreen({
   const total = free + held;
   const ratio = total === 0n ? 1 : toNumber(free) / toNumber(total);
 
+  const nextRelease =
+    open.length === 0
+      ? null
+      : open.reduce((soonest, c) => (c.unlockDate < soonest.unlockDate ? c : soonest), open[0]);
+
   return (
     <motion.div className="page" {...screenMotion}>
       <TopBar address={address} onOpenWallet={onOpenWallet} />
@@ -170,14 +175,6 @@ export function HomeScreen({
           </p>
           <p className="body-sm" style={{ marginTop: 8 }}>
             available right now
-          </p>
-          <p className="body-sm" style={{ marginTop: 4, fontSize: 13 }}>
-            {walletBalance === null ? (
-              "—"
-            ) : (
-              <span style={{ fontWeight: 600, color: "var(--text-2)" }}>{eth(walletBalance)} ETH</span>
-            )}{" "}
-            available to add
           </p>
         </div>
         {total > 0n && (
@@ -233,6 +230,23 @@ export function HomeScreen({
         ))}
       </section>
 
+      {nextRelease && (
+        <section style={{ marginTop: 28 }}>
+          <p className="label-xs" style={{ marginBottom: 10 }}>
+            Next release
+          </p>
+          <div className="card" style={{ padding: 16 }}>
+            <p style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{nextRelease.label || "Untitled"}</p>
+            <p className="num" style={{ marginTop: 6 }}>
+              {eth(nextRelease.amount)} ETH
+            </p>
+            <p className="body-sm" style={{ marginTop: 4 }}>
+              Releases {formatDate(nextRelease.unlockDate)} · {daysRemaining(nextRelease.unlockDate)} days
+            </p>
+          </div>
+        </section>
+      )}
+
       {readError && (
         <p className="error-text" style={{ marginTop: 20 }}>
           {readError}
@@ -258,15 +272,17 @@ export function HoldsScreen({
   commitments,
   onBack,
   onHold,
+  onSelect,
 }: {
   commitments: Commitment[] | null;
   onBack: () => void;
   onHold: () => void;
+  onSelect: (index: number) => void;
 }) {
-  const all = commitments ?? [];
-  const open = all.filter((c) => !c.released);
-  const released = all.filter((c) => c.released);
-  const held = open.reduce((sum, c) => sum + c.amount, 0n);
+  const all = (commitments ?? []).map((c, i) => ({ c, i }));
+  const open = all.filter(({ c }) => !c.released);
+  const released = all.filter(({ c }) => c.released);
+  const held = open.reduce((sum, { c }) => sum + c.amount, 0n);
 
   return (
     <motion.div className="page-narrow" {...screenMotion}>
@@ -279,8 +295,13 @@ export function HoldsScreen({
           : `${eth(held)} ETH is held across ${open.length} ${open.length === 1 ? "hold" : "holds"}.`}
       </p>
 
-      {open.map((c, i) => (
-        <HoldRow key={i} commitment={c} shareOfHeld={held === 0n ? 0 : toNumber(c.amount) / toNumber(held)} />
+      {open.map(({ c, i }) => (
+        <HoldRow
+          key={i}
+          commitment={c}
+          shareOfHeld={held === 0n ? 0 : toNumber(c.amount) / toNumber(held)}
+          onClick={() => onSelect(i)}
+        />
       ))}
 
       {released.length > 0 && (
@@ -288,8 +309,13 @@ export function HoldsScreen({
           <p className="label-xs" style={{ marginTop: 32, marginBottom: 4 }}>
             Released
           </p>
-          {released.map((c, i) => (
-            <div key={i} className="list-row" style={{ opacity: 0.6 }}>
+          {released.map(({ c, i }) => (
+            <button
+              key={i}
+              className="list-row"
+              style={{ opacity: 0.6, cursor: "pointer" }}
+              onClick={() => onSelect(i)}
+            >
               <span className="icon-badge" style={{ background: "var(--success-bg)", color: "var(--success)" }}>
                 <Lock size={18} />
               </span>
@@ -300,7 +326,7 @@ export function HoldsScreen({
                 </span>
               </span>
               <span className="num">{eth(c.amount)} ETH</span>
-            </div>
+            </button>
           ))}
         </>
       )}
@@ -317,25 +343,29 @@ export function HoldsScreen({
   );
 }
 
-export function ActivityScreen({
-  commitments,
-  sessionTx,
-}: {
-  commitments: Commitment[] | null;
-  sessionTx: { kind: string; hash: string }[];
-}) {
-  const all = commitments ?? [];
+const ACTIVITY_META: Record<ActivityEvent["kind"], { title: string; icon: React.ReactNode }> = {
+  added: { title: "Added money", icon: <Plus size={18} /> },
+  held: { title: "Money held", icon: <Lock size={18} /> },
+  sent: { title: "Money sent", icon: <ArrowUpRight size={18} /> },
+  released: { title: "Money released", icon: <LockKeyhole size={18} /> },
+  failed: { title: "Failed", icon: <TriangleAlert size={18} /> },
+};
 
+function formatEventDate(at: number) {
+  return new Date(at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+export function ActivityScreen({ events }: { events: ActivityEvent[] }) {
   return (
     <motion.div className="page-narrow" {...screenMotion}>
       <h1 className="title" style={{ marginBottom: 8 }}>
         Activity
       </h1>
       <p className="body" style={{ marginBottom: 24 }}>
-        Holds recorded on-chain, and transactions sent from this device.
+        Transactions sent from this device this session.
       </p>
 
-      {all.length === 0 && sessionTx.length === 0 && (
+      {events.length === 0 && (
         <div className="empty-state">
           <span className="icon-badge" style={{ margin: "0 auto 12px" }}>
             <ActivityIcon size={18} />
@@ -344,51 +374,64 @@ export function ActivityScreen({
         </div>
       )}
 
-      {all.map((c, i) => (
-        <div key={i} className="list-row">
-          <span
-            className="icon-badge"
-            style={
-              c.released
-                ? { background: "var(--success-bg)", color: "var(--success)" }
-                : undefined
-            }
-          >
-            <Lock size={18} />
-          </span>
-          <span style={{ flex: 1, minWidth: 0 }}>
-            <span style={{ display: "block", fontSize: 15, fontWeight: 600 }}>
-              {c.released ? "Released" : "Held"} · {c.label || "Untitled"}
+      {events.map((event) => {
+        const meta = ACTIVITY_META[event.kind];
+        const failed = event.status === "failed";
+        return (
+          <div key={event.id} className="list-row" style={{ alignItems: "flex-start" }}>
+            <span
+              className="icon-badge"
+              style={failed ? { background: "var(--error-bg)", color: "var(--error)" } : undefined}
+            >
+              {meta.icon}
             </span>
-            <span style={{ display: "block", fontSize: 13, color: "var(--text-2)", marginTop: 2 }}>
-              {c.released ? "Released" : "Releases"} {formatDate(c.unlockDate)}
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: 15, fontWeight: 600 }}>
+                {meta.title}
+                {event.label ? ` · ${event.label}` : ""}
+              </span>
+              <span style={{ display: "block", fontSize: 13, color: "var(--text-2)", marginTop: 2 }}>
+                {formatEventDate(event.at)}
+              </span>
+              {failed && event.errorMessage && (
+                <span className="mono-note" style={{ display: "block", marginTop: 4 }}>
+                  {event.errorMessage}
+                </span>
+              )}
+              {event.hash && (
+                <a
+                  className="mono-note"
+                  style={{ color: "var(--blue)", display: "block", marginTop: 4 }}
+                  href={`https://sepolia.etherscan.io/tx/${event.hash}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {event.hash}
+                </a>
+              )}
             </span>
-          </span>
-          <span className="num">{eth(c.amount)} ETH</span>
-        </div>
-      ))}
-
-      {sessionTx.length > 0 && (
-        <>
-          <p className="label-xs" style={{ marginTop: 32, marginBottom: 8 }}>
-            This session
-          </p>
-          {sessionTx.map((t, i) => (
-            <div key={i} style={{ padding: "10px 0", borderTop: i ? "1px solid var(--border)" : undefined }}>
-              <div style={{ fontSize: 14, fontWeight: 600, textTransform: "capitalize" }}>{t.kind}</div>
-              <a
-                className="mono-note"
-                style={{ color: "var(--blue)", display: "block", marginTop: 2 }}
-                href={`https://sepolia.etherscan.io/tx/${t.hash}`}
-                target="_blank"
-                rel="noreferrer"
+            <span style={{ textAlign: "right", flex: "none" }}>
+              <span className="num" style={{ display: "block", color: failed ? "var(--error)" : undefined }}>
+                {event.amount} ETH
+              </span>
+              <span
+                className="badge"
+                style={{
+                  marginTop: 6,
+                  height: 20,
+                  padding: "0 8px",
+                  fontSize: 11,
+                  ...(failed
+                    ? { background: "var(--error-bg)", color: "var(--error)" }
+                    : { background: "var(--success-bg)", color: "var(--success)" }),
+                }}
               >
-                {t.hash}
-              </a>
-            </div>
-          ))}
-        </>
-      )}
+                {failed ? "Failed" : "Confirmed"}
+              </span>
+            </span>
+          </div>
+        );
+      })}
     </motion.div>
   );
 }

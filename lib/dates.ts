@@ -12,3 +12,12 @@ export function formatDate(unlockDate: bigint) {
     year: "numeric",
   });
 }
+
+export function daysRemaining(unlockDate: bigint) {
+  const ms = Number(unlockDate) * 1000 - Date.now();
+  return Math.max(0, Math.ceil(ms / 86_400_000));
+}
+
+export function isUnlocked(unlockDate: bigint) {
+  return Number(unlockDate) * 1000 <= Date.now();
+}

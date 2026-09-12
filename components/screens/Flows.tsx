@@ -2,10 +2,11 @@
 
 import { motion } from "framer-motion";
 import { parseEther } from "viem";
-import { ArrowLeft, CalendarDays, Check, Info, Lock, ScanLine, TriangleAlert } from "lucide-react";
+import { ArrowLeft, CalendarDays, Check, Lock, ScanLine, TriangleAlert } from "lucide-react";
 import { AnimatedEth, Button, Field, decimalsFor, eth, screenMotion, toNumber } from "@/components/ui";
 import { FlowChannel } from "@/components/FlowChannel";
-import { dateInputToTimestamp, formatDate } from "@/lib/dates";
+import { dateInputToTimestamp, formatDate, isUnlocked } from "@/lib/dates";
+import type { Commitment } from "@/components/screens/Home";
 
 /** Preview-only parse. The transaction itself still parses in the handler. */
 export function safeParseEth(value: string): bigint | null {
@@ -86,7 +87,7 @@ export function HoldMoneyScreen({
           </div>
           {exceeds && (
             <p className="body-sm" style={{ color: "var(--error)", marginTop: 8 }}>
-              You only have {eth(free)} ETH free to hold.
+              You can only hold {eth(free)} ETH right now.
             </p>
           )}
         </Field>
@@ -284,6 +285,9 @@ export function AddMoneyScreen({
   amount,
   pending,
   error,
+  walletBalance,
+  freeBalance,
+  heldTotal,
   onAmount,
   onSubmit,
   onBack,
@@ -291,27 +295,50 @@ export function AddMoneyScreen({
   amount: string;
   pending: boolean;
   error: string | null;
+  walletBalance: bigint | null;
+  freeBalance: bigint | null;
+  heldTotal: bigint;
   onAmount: (v: string) => void;
   onSubmit: (e: React.FormEvent) => void;
   onBack: () => void;
 }) {
+  const availableToAdd = walletBalance ?? 0n;
+  const free = freeBalance ?? 0n;
+  const currentBalance = free + heldTotal;
   const parsed = safeParseEth(amount);
-  const canSubmit = parsed !== null && parsed > 0n && !pending;
+  const exceeds = parsed !== null && parsed > availableToAdd;
+  const afterDeposit = parsed === null || exceeds ? currentBalance : currentBalance + parsed;
+  const availableAfter = parsed === null || exceeds ? free : free + parsed;
+  const canSubmit = parsed !== null && parsed > 0n && !exceeds && !pending;
+
+  const places = decimalsFor(Math.min(toNumber(currentBalance) || 1, toNumber(afterDeposit) || 1));
 
   return (
     <motion.div className="page-narrow" {...screenMotion}>
       <BackBar onBack={onBack} />
 
       <h1 className="title">Add money</h1>
-      <p className="body" style={{ marginTop: 8, marginBottom: 32 }}>
+      <p className="body" style={{ marginTop: 8, marginBottom: 24 }}>
         Bring money into your Levee wallet.
       </p>
+
+      <div className="card-blue" style={{ marginBottom: 32 }}>
+        <p className="label-xs" style={{ color: "var(--blue-dark)" }}>
+          Available to add
+        </p>
+        <p style={{ fontSize: 28, fontWeight: 680, letterSpacing: "-1px", margin: "8px 0 0", fontVariantNumeric: "tabular-nums" }}>
+          {walletBalance === null ? "—" : <AnimatedEth value={toNumber(walletBalance)} />} ETH
+        </p>
+        <p className="body-sm" style={{ marginTop: 6, fontSize: 13 }}>
+          You can add up to this amount to your Levee wallet.
+        </p>
+      </div>
 
       <form onSubmit={onSubmit} className="stack-24">
         <Field label="Amount">
           <div className="input-wrap">
             <input
-              className="input input-has-suffix"
+              className={`input input-has-suffix${exceeds ? " input-error" : ""}`}
               type="text"
               inputMode="decimal"
               placeholder="0.010"
@@ -320,15 +347,35 @@ export function AddMoneyScreen({
             />
             <span className="input-suffix">ETH</span>
           </div>
+          {exceeds && (
+            <p className="body-sm" style={{ color: "var(--error)", marginTop: 8 }}>
+              You can only add up to {eth(availableToAdd)} ETH right now.
+            </p>
+          )}
         </Field>
 
-        <div className="card-info">
-          <Info size={18} style={{ flex: "none", marginTop: 1 }} />
-          <span>Your available balance will increase after the deposit is confirmed.</span>
+        <div className="card">
+          <p style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", margin: 0 }}>Deposit preview</p>
+          <div className="summary-row" style={{ marginTop: 4 }}>
+            <span className="body-sm">Current balance</span>
+            <span className="num">{toNumber(currentBalance).toFixed(places)} ETH</span>
+          </div>
+          <div className="summary-row">
+            <span className="body-sm">After deposit</span>
+            <span className="num num-blue">
+              <AnimatedEth value={toNumber(afterDeposit)} decimals={places} /> ETH
+            </span>
+          </div>
+          <div className="summary-row">
+            <span className="body-sm">Available to spend</span>
+            <span className="num">
+              <AnimatedEth value={toNumber(availableAfter)} decimals={places} /> ETH
+            </span>
+          </div>
         </div>
 
         <Button type="submit" disabled={!canSubmit}>
-          {pending ? "Adding…" : "Add money"}
+          {pending ? "Adding…" : parsed !== null && !exceeds ? `Add ${eth(parsed)} ETH` : "Add money"}
         </Button>
       </form>
 
@@ -374,7 +421,7 @@ export function BlockedScreen({
         You can&apos;t spend that much yet.
       </h1>
       <p className="body" style={{ marginTop: 12 }}>
-        {eth(heldTotal)} ETH is currently held for your upcoming commitments.
+        {eth(heldTotal)} ETH is protected by your active holds.
       </p>
 
       <div className="card" style={{ marginTop: 24 }}>
@@ -400,6 +447,103 @@ export function BlockedScreen({
           View holds
         </Button>
       </div>
+    </motion.div>
+  );
+}
+
+/* --------------------------------------------------------- hold detail ---- */
+
+export function HoldDetailScreen({
+  commitment,
+  hash,
+  pending,
+  error,
+  onRelease,
+  onBack,
+}: {
+  commitment: Commitment;
+  hash: string | null;
+  pending: boolean;
+  error: string | null;
+  onRelease: () => void;
+  onBack: () => void;
+}) {
+  const unlockable = !commitment.released && isUnlocked(commitment.unlockDate);
+  const statusLabel = commitment.released ? "Released" : unlockable ? "Unlocked" : "Protected";
+  const statusStyle = commitment.released
+    ? { background: "var(--success-bg)", color: "var(--success)" }
+    : unlockable
+      ? { background: "var(--blue-bg)", color: "var(--blue-dark)" }
+      : { background: "var(--border)", color: "var(--text-2)" };
+
+  return (
+    <motion.div className="page-narrow" {...screenMotion}>
+      <BackBar onBack={onBack} />
+
+      <h1 className="title">Hold details</h1>
+
+      <div className="card stack-16" style={{ marginTop: 24 }}>
+        <div>
+          <p className="label-xs">Purpose</p>
+          <p style={{ fontSize: 16, fontWeight: 600, marginTop: 6 }}>{commitment.label || "Untitled"}</p>
+        </div>
+        <hr className="divider" />
+        <div>
+          <p className="label-xs">Amount</p>
+          <p className="num" style={{ fontSize: 18, marginTop: 6 }}>
+            {eth(commitment.amount)} ETH
+          </p>
+        </div>
+        <hr className="divider" />
+        <div>
+          <p className="label-xs">Release date</p>
+          <p className="body-sm" style={{ color: "var(--text)", marginTop: 6 }}>
+            {formatDate(commitment.unlockDate)}
+          </p>
+        </div>
+        <hr className="divider" />
+        <div className="row-between">
+          <p className="label-xs" style={{ margin: 0 }}>
+            Status
+          </p>
+          <span className="badge" style={statusStyle}>
+            {statusLabel}
+          </span>
+        </div>
+        <hr className="divider" />
+        <div>
+          <p className="label-xs">Transaction</p>
+          {hash ? (
+            <a
+              className="btn-tertiary"
+              style={{ justifyContent: "flex-start", marginTop: 6 }}
+              href={`https://sepolia.etherscan.io/tx/${hash}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View transaction →
+            </a>
+          ) : (
+            <p className="body-sm" style={{ marginTop: 6 }}>
+              Not available for holds made before this session.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {unlockable && (
+        <div style={{ marginTop: 24 }}>
+          <Button onClick={onRelease} disabled={pending}>
+            <Lock size={18} /> {pending ? "Releasing…" : "Release money"}
+          </Button>
+        </div>
+      )}
+
+      {error && (
+        <p className="error-text" style={{ marginTop: 20 }}>
+          {error}
+        </p>
+      )}
     </motion.div>
   );
 }
