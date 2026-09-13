@@ -15,7 +15,7 @@ Levee holds money against a date and refuses to release it early.
   ```
 
 - OpenAPI spec: [levee-seven.vercel.app/api/openapi](https://levee-seven.vercel.app/api/openapi)
-- Bazantic gateway / Recipe: published, but the gateway base URL, the spec URL used, and the Recipe name are not recorded in this repository — see Agent interface below.
+- Bazantic gateway: base URL `https://levee-seven.vercel.app`, spec URL `https://levee-seven.vercel.app/api/openapi` — see Bazantic below.
 
 This is Sepolia testnet only. The ETH held by the contract has no monetary value.
 
@@ -51,8 +51,6 @@ An earlier version of this route fetched Subgraph history through The Graph's Su
 
 `GET /api/spend-check` (`app/api/spend-check/route.ts`) is a separate, unauthenticated endpoint built for AI agents rather than the chat UI. It combines two sources in one response: `allowed`, `freeBalance`, and `blockingCommitment` come from a live `canSpend`/`freeBalance` contract read; `upcomingObligations` comes from the Subgraph's indexed `Committed`/`Released` events. The response's `sources` field states which is which, so a caller doesn't have to guess which part is live and which part can lag.
 
-`GET /api/openapi` (`app/api/openapi/route.ts`) serves an OpenAPI 3.0 description of `/api/spend-check`, with field-level descriptions written for an agent deciding whether and how to call it. This spec is published as a Recipe to Bazantic's agent gateway. The gateway base URL, the spec URL Bazantic actually fetched, and the published Recipe's name are not recorded anywhere in this repository — none of that lives in code, so it isn't stated here until it's confirmed.
-
 ## Stack
 
 From `package.json`:
@@ -65,6 +63,7 @@ From `package.json`:
 - `lucide-react` 1.45.0 — icons
 - Tailwind CSS 4
 - TypeScript 5
+- Bazantic — x402 gateway and published Recipe over the spend-check endpoint
 
 The Subgraph (`levee-sepolia/`) is a separate project using `@graphprotocol/graph-cli` 0.98.1 and `@graphprotocol/graph-ts` 0.37.0, deployed independently of the Next.js app.
 
@@ -94,6 +93,14 @@ Required environment variables in `.env.local`:
 
 `contracts/DEPLOY.md` as written describes deploying to Base Sepolia (chain ID `84532`); that document does not match where the contract actually ended up. The live, verified deployment is Ethereum Sepolia at the address above.
 
+## Privy
+
+Authentication is configured in `components/PrivyProviders.tsx`, which wraps the app inside `app/layout.tsx`. The Privy app ID comes from `NEXT_PUBLIC_PRIVY_APP_ID`.
+
+`loginMethods` is `["email", "google", "twitter", "discord", "github", "apple"]` — email plus five social logins. There is no `wallet` login method configured, so connecting an existing external wallet is not offered anywhere in the sign-in flow.
+
+`embeddedWallets.ethereum.createOnLogin` is `"users-without-wallets"`, so every account that signs in gets a Privy-managed embedded wallet automatically — in practice, every account, since no external wallet option exists to bring one instead. `defaultChain` and `supportedChains` are both set to `sepolia`; the embedded wallet only ever operates on Ethereum Sepolia.
+
 ## Subgraph
 
 The Subgraph lives in `levee-sepolia/` as its own package, independent of the Next.js app's `package.json`.
@@ -110,10 +117,14 @@ npm run deploy
 
 It indexes four events from the Levee contract, starting at block `11684853`: `Committed`, `Deposited`, `Released`, `Spent`.
 
-## Privy
+## Bazantic
 
-Authentication is configured in `components/PrivyProviders.tsx`, which wraps the app inside `app/layout.tsx`. The Privy app ID comes from `NEXT_PUBLIC_PRIVY_APP_ID`.
+`/api/openapi` (`app/api/openapi/route.ts`) serves a static OpenAPI 3.0.3 document describing `/api/spend-check` — its two query parameters, its 200/400/502 response shapes, and a field-by-field description of every response property, written for an agent deciding whether and how to call it.
 
-`loginMethods` is `["email", "google", "twitter", "discord", "github", "apple"]` — email plus five social logins. There is no `wallet` login method configured, so connecting an existing external wallet is not offered anywhere in the sign-in flow.
+Bazantic's gateway is configured against this app directly: base URL `https://levee-seven.vercel.app`, spec URL `https://levee-seven.vercel.app/api/openapi`. The endpoint takes no auth — no API key, no header, no session — and is plain REST: a `GET` request with two query parameters, answered with a JSON body.
 
-`embeddedWallets.ethereum.createOnLogin` is `"users-without-wallets"`, so every account that signs in gets a Privy-managed embedded wallet automatically — in practice, every account, since no external wallet option exists to bring one instead. `defaultChain` and `supportedChains` are both set to `sepolia`; the embedded wallet only ever operates on Ethereum Sepolia.
+The published Recipe is named `Levee Spend-Check API`, taken from the spec's `info.title`. It exposes one operation, `checkSpendability`: given a wallet address and a specific ETH amount, it returns whether that exact amount is spendable right now.
+
+The Recipe's answer combines two sources. The verdict — `allowed`, `freeBalance`, `blockingCommitment` — is a live read of `canSpend()` and `freeBalance()` on the Levee contract, so it is never stale. The `upcomingObligations` list — every unreleased commitment on the wallet, each with the transaction hash that created it — comes from the Subgraph's indexed `Committed`/`Released` events instead, because the contract's stored `Commitment` struct has no transaction hash field; only the indexed event does. Neither source alone answers the Recipe's question: the contract alone can't supply that transaction history, and the Subgraph alone can lag the latest block, so it is never used for the right-now verdict.
+
+Every response's `sources` field states which half came from which: `sources.verdict` always names the live contract read, and `sources.upcomingObligations` says whether the Subgraph was reachable for that request.
