@@ -6,7 +6,7 @@ import { formatDate } from "@/lib/dates";
 export const maxDuration = 30;
 
 const SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1760220/levee-sepolia/v0.0.1";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.6-flash";
 
 // Copied from app/api/spend-check/route.ts, which is confirmed working on Vercel.
 const client = createPublicClient({
