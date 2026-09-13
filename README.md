@@ -14,6 +14,9 @@ Levee holds money against a date and refuses to release it early.
   curl "https://levee-seven.vercel.app/api/spend-check?wallet=0x8330bdfb84f72c364fd8083a3ac221ee642b85de&amount=0.001"
   ```
 
+- OpenAPI spec: [levee-seven.vercel.app/api/openapi](https://levee-seven.vercel.app/api/openapi)
+- Bazantic gateway / Recipe: published, but the gateway base URL, the spec URL used, and the Recipe name are not recorded in this repository — see Agent interface below.
+
 This is Sepolia testnet only. The ETH held by the contract has no monetary value.
 
 ## How it works
@@ -28,21 +31,27 @@ Free balance is `balanceOf[user] - committedOf[user]` — total deposited minus 
 
 Releasing calls `release(commitmentId)`. It only succeeds once `block.timestamp >= unlockDate` for that commitment; calling it earlier reverts with `NotYetUnlocked()`. A released commitment's amount moves back into free balance and can be spent immediately.
 
+The contract holds a single asset, ETH, on a single chain — there is no token support and no cross-chain functionality. Held funds earn no yield; money inside the contract sits at exactly the balance it was deposited at until spent or released.
+
 ## Refusal policy
 
 Every spend in the UI calls `canSpend(wallet, amount)` first and shows the blocking commitment's label and unlock date if the amount would exceed free balance, before attempting `spendFree()`.
 
 The contract itself enforces the same rule independent of the UI: `spendFree()` reverts with `ExceedsFreeBalance()` for any caller who tries to spend past their own free balance, and `release()` reverts with `NotYetUnlocked()` for any caller — including the commitment's own owner — who tries to release before the unlock date. There is no admin function, owner override, or emergency withdraw that bypasses either check.
 
+Commitments are bound to a wallet address, not a verified identity. Nothing in the contract or the app prevents someone from abandoning a wallet with active commitments and starting over with a new one.
+
 ## Ask Levee
 
 The chat panel in the app (`components/ChatPanel.tsx`, served by `app/api/chat/route.ts`) is a natural-language interface over the same data the UI reads: live `freeBalance` and `commitmentsOf` reads from the contract, plus recent `Committed`/`Released`/`Spent` history from the Subgraph. Both are packed into a single prompt sent to Gemini (`gemini-3.6-flash`) with no tool-calling loop and no other data source. The system prompt instructs it to answer only from that data and never invent figures; it has no mechanism to fetch anything else.
+
+An earlier version of this route fetched Subgraph history through The Graph's Subgraph MCP server over SSE. That worked in local development and was removed from the production code path entirely, because the SSE transport does not reliably complete its handshake in Vercel's serverless environment — it caused `/api/chat` requests to hang until Vercel's function timeout. The Subgraph history above is fetched with a plain HTTP POST instead, with no MCP client, no SDK, and no tool-calling loop.
 
 ## Agent interface
 
 `GET /api/spend-check` (`app/api/spend-check/route.ts`) is a separate, unauthenticated endpoint built for AI agents rather than the chat UI. It combines two sources in one response: `allowed`, `freeBalance`, and `blockingCommitment` come from a live `canSpend`/`freeBalance` contract read; `upcomingObligations` comes from the Subgraph's indexed `Committed`/`Released` events. The response's `sources` field states which is which, so a caller doesn't have to guess which part is live and which part can lag.
 
-`GET /api/openapi` (`app/api/openapi/route.ts`) serves an OpenAPI 3.0 description of `/api/spend-check`, with field-level descriptions written for an agent deciding whether and how to call it. This spec is intended to be published as a Recipe to an agent gateway such as Bazantic — see Known limitations below for what is and isn't confirmed about that submission.
+`GET /api/openapi` (`app/api/openapi/route.ts`) serves an OpenAPI 3.0 description of `/api/spend-check`, with field-level descriptions written for an agent deciding whether and how to call it. This spec is published as a Recipe to Bazantic's agent gateway. The gateway base URL, the spec URL Bazantic actually fetched, and the published Recipe's name are not recorded anywhere in this repository — none of that lives in code, so it isn't stated here until it's confirmed.
 
 ## Stack
 
@@ -75,7 +84,7 @@ Required environment variables in `.env.local`:
 - `NEXT_PUBLIC_PRIVY_APP_ID` — Privy app ID, used client-side for login.
 - `GEMINI_API_KEY` — used server-side only, in `app/api/chat/route.ts`.
 
-`GRAPH_GATEWAY_API_KEY` is not required. It was used by an earlier MCP integration that has since been removed from the code entirely — see Known limitations.
+`GRAPH_GATEWAY_API_KEY` is not required. It was used by an earlier MCP integration that has since been removed from the code entirely — see Ask Levee above.
 
 `npm run build` and `npm run lint` both need to pass with no errors before a change is considered done in this repo.
 
@@ -101,18 +110,10 @@ npm run deploy
 
 It indexes four events from the Levee contract, starting at block `11684853`: `Committed`, `Deposited`, `Released`, `Spent`.
 
-## Bounty submissions
+## Privy
 
-This section needs the actual published bounty requirements for Privy ("Best Financial Flow"), The Graph ("Best AI Tooling or AI Use Case, From Scratch"), and Bazantic ("Best Recipe") to write an honest mapping instead of a generic description. `Bazantic` does not appear anywhere in this codebase — the `/api/openapi` endpoint above was built to be published as a Recipe there, but nothing in this repo confirms that submission happened or states what "Best Recipe" actually requires. Provide the requirement text or links for these three tracks and this section will be filled in with a plain sentence-by-sentence mapping, no persuasive language, matching the rest of this document.
+Authentication is configured in `components/PrivyProviders.tsx`, which wraps the app inside `app/layout.tsx`. The Privy app ID comes from `NEXT_PUBLIC_PRIVY_APP_ID`.
 
-## Known limitations
+`loginMethods` is `["email", "google", "twitter", "discord", "github", "apple"]` — email plus five social logins. There is no `wallet` login method configured, so connecting an existing external wallet is not offered anywhere in the sign-in flow.
 
-MCP (Model Context Protocol) integration with The Graph's Subgraph MCP server worked in local development but was removed from the production code path entirely. Its SSE (Server-Sent Events) transport does not reliably complete its handshake in Vercel's serverless environment, which caused `/api/chat` requests to hang until Vercel's function timeout. `app/api/chat/route.ts` now queries the Subgraph directly over plain HTTP POST instead, with no MCP client, no SDK, and no tool-calling loop.
-
-This is Sepolia testnet only. Nothing here has been deployed to Ethereum mainnet or any other production chain.
-
-The contract holds a single asset, ETH, on a single chain. There is no token support and no cross-chain functionality.
-
-Held funds earn no yield. Money inside the contract sits at exactly the balance it was deposited at until spent or released.
-
-Commitments are bound to a wallet address, not a verified identity. Nothing in the contract or the app prevents someone from abandoning a wallet with active commitments and starting over with a new one.
+`embeddedWallets.ethereum.createOnLogin` is `"users-without-wallets"`, so every account that signs in gets a Privy-managed embedded wallet automatically — in practice, every account, since no external wallet option exists to bring one instead. `defaultChain` and `supportedChains` are both set to `sepolia`; the embedded wallet only ever operates on Ethereum Sepolia.
