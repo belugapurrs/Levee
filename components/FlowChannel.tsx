@@ -4,30 +4,60 @@ import { motion, useReducedMotion } from "framer-motion";
 
 export type FlowPhase = "idle" | "adding" | "holding" | "spending" | "releasing" | "blocked";
 
+type Pellet = {
+  top: number;
+  width: number;
+  height: number;
+  baseOpacity: number;
+  duration: number;
+  delay: number;
+  driftY: number[];
+};
+
+// Varied width/height/opacity/timing per pellet is what reads as organic rather than
+// mechanical — a single repeated shape moving at one speed would look like a loading bar.
+const PELLETS: Pellet[] = [
+  { top: 14, width: 12, height: 3, baseOpacity: 0.55, duration: 9, delay: 0, driftY: [0, -2, 1, 0] },
+  { top: 26, width: 9, height: 2, baseOpacity: 0.4, duration: 11, delay: 1.4, driftY: [0, 2, -1, 0] },
+  { top: 34, width: 14, height: 4, baseOpacity: 0.5, duration: 8.5, delay: 2.6, driftY: [0, -1, 2, 0] },
+  { top: 44, width: 10, height: 3, baseOpacity: 0.45, duration: 10, delay: 0.8, driftY: [0, 1, -2, 0] },
+  { top: 52, width: 13, height: 3, baseOpacity: 0.35, duration: 12, delay: 3.5, driftY: [0, -2, 1, 0] },
+  { top: 60, width: 8, height: 2, baseOpacity: 0.5, duration: 9.5, delay: 1.9, driftY: [0, 1, -1, 0] },
+];
+
 /**
- * A continuous, very low-opacity sheen drifting left → right inside the Available fill.
- * Unlike the transactional particles below, this always runs — it reads as the same
- * money quietly moving toward the boundary, not as a state change, so it stays subtle
- * and never competes with the one-shot bursts.
+ * Small, continuous pellets drifting left → right inside the Available fill, toward the
+ * levee boundary. Unlike the transactional particles below, this always runs — it reads
+ * as the same money quietly moving, not as a state change, so it stays subtle and never
+ * competes with the one-shot bursts. Positioned as children of the Available fill (which
+ * clips overflow), so they can never appear past the boundary or inside Held.
  */
 function AmbientFlow() {
   return (
-    <motion.div
-      aria-hidden
-      style={{
-        position: "absolute",
-        top: 0,
-        bottom: 0,
-        width: "45%",
-        background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.24), transparent)",
-        filter: "blur(7px)",
-        mixBlendMode: "screen",
-        pointerEvents: "none",
-      }}
-      initial={{ left: "-45%" }}
-      animate={{ left: "100%" }}
-      transition={{ duration: 7, repeat: Infinity, repeatType: "loop", ease: "easeInOut" }}
-    />
+    <>
+      {PELLETS.map((p, i) => (
+        <motion.span
+          key={i}
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: p.top,
+            width: p.width,
+            height: p.height,
+            borderRadius: p.height / 2,
+            background: `rgba(191, 210, 255, ${p.baseOpacity})`,
+            pointerEvents: "none",
+          }}
+          initial={{ left: "-20%", opacity: 0, y: 0 }}
+          animate={{ left: "108%", y: p.driftY, opacity: [0, 1, 1, 0] }}
+          transition={{
+            left: { duration: p.duration, delay: p.delay, repeat: Infinity, ease: "linear" },
+            y: { duration: p.duration, delay: p.delay, repeat: Infinity, ease: "easeInOut" },
+            opacity: { duration: p.duration, delay: p.delay, repeat: Infinity, ease: "easeInOut" },
+          }}
+        />
+      ))}
+    </>
   );
 }
 
