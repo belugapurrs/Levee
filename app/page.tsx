@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import { usePrivy, useWallets, type ConnectedWallet } from "@privy-io/react-auth";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -407,7 +408,14 @@ export default function Home() {
   if (!authenticated) {
     return (
       <motion.div className="center-state" {...screenMotion}>
-        <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", marginBottom: 8 }}>LEVEE</div>
+        <Image
+          src="/logo_levee.png"
+          alt="Levee"
+          width={120}
+          height={120}
+          priority
+          style={{ marginBottom: 8 }}
+        />
         <h1 className="title" style={{ maxWidth: 320 }}>
           Know what&apos;s safe to spend
         </h1>
