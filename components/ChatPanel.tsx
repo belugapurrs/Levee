@@ -89,11 +89,22 @@ export function ChatPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, walletAddress: embeddedWallet.address }),
       });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        throw new Error(data.error || "Something went wrong. Try again.");
+
+      // A platform-level failure (a Vercel timeout page, a proxy error) returns HTML or
+      // plain text, not JSON — read as text first so that case surfaces its own message
+      // instead of a confusing "Unexpected token" JSON.parse crash.
+      const raw = await res.text();
+      let data: { answer?: string; error?: string } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: raw.trim() ? raw.slice(0, 300) : `Request failed (${res.status}).` };
       }
-      setMessages((prev) => [...prev, { id: nextId(), role: "assistant", content: data.answer }]);
+
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `Request failed (${res.status}).`);
+      }
+      setMessages((prev) => [...prev, { id: nextId(), role: "assistant", content: data.answer ?? "" }]);
     } catch (err) {
       setMessages((prev) => [
         ...prev,

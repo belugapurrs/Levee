@@ -1,7 +1,5 @@
 import { createPublicClient, formatEther, http, isAddress, parseEther } from "viem";
 import { sepolia } from "viem/chains";
-import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { LEVEE_ABI, LEVEE_ADDRESS } from "@/lib/leveeAbi";
 import { formatDate } from "@/lib/dates";
 
@@ -11,7 +9,7 @@ import { formatDate } from "@/lib/dates";
 export const maxDuration = 30;
 
 const GEMINI_MODEL = "gemini-3.6-flash";
-const GEMINI_TIMEOUT_MS = 20_000;
+const GEMINI_TIMEOUT_MS = 10_000;
 
 // Past this much elapsed wall-clock time since the request started, there isn't enough
 // of the 30s budget left to safely attempt a tool call (network round trip) and still
@@ -22,7 +20,6 @@ const TOOL_CALL_ELAPSED_BUDGET_MS = 20_000;
 const SAMPLE_AMOUNTS_ETH = ["0.001", "0.005", "0.01"] as const;
 
 const SUBGRAPH_URL = "https://api.studio.thegraph.com/query/1760220/levee-sepolia/v0.0.1";
-const SUBGRAPH_MCP_URL = "https://subgraphs.mcp.thegraph.com/sse";
 
 const HISTORY_QUERY = `
   query History($user: Bytes!) {
@@ -186,7 +183,7 @@ const SYSTEM_INSTRUCTION =
   "query any other address.";
 
 // Gemini decides when to call this — the natural-language layer is what actually drives
-// The Graph's Subgraph MCP server, rather than the route silently pre-fetching through it.
+// the extra Subgraph query, rather than the route silently pre-fetching it on every request.
 // The wallet filter is never exposed as a parameter: the model can only choose which entity,
 // how many, and in what order — the `where: { user }` clause is always injected server-side
 // in callSubgraphMcp, so a query can never reach across wallets.
@@ -246,88 +243,26 @@ async function fetchHistory(walletAddress: `0x${string}`): Promise<SubgraphHisto
   }
 }
 
-/** The MCP tools address deployments by IPFS hash, not the Studio query URL, so resolve it live. */
-async function fetchDeploymentIpfsHash(): Promise<string> {
-  const res = await fetch(SUBGRAPH_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query: "{ _meta { deployment } }" }),
-  });
-  const json = await res.json();
-  const hash = json?.data?._meta?.deployment;
-  if (typeof hash !== "string") {
-    throw new Error("Could not resolve the subgraph's deployment hash.");
-  }
-  return hash;
-}
-
 const MCP_ENTITY_FIELDS: Record<"committeds" | "releaseds" | "spents", string> = {
   committeds: "commitmentId amount unlockDate label blockTimestamp transactionHash",
   releaseds: "commitmentId amount blockTimestamp transactionHash",
   spents: "to amount blockTimestamp transactionHash",
 };
 
-const MCP_TIMEOUT_MS = 5_000;
-const DIRECT_SUBGRAPH_FALLBACK_TIMEOUT_MS = 5_000;
+const DIRECT_SUBGRAPH_TIMEOUT_MS = 5_000;
 
 /**
- * Runs the MCP tool call bounded by a hard 5s deadline. The SDK's own request options
- * only cover the post-connect `initialize`/`tools/call` messages — the transport-level
- * `connect()` (the SSE handshake) has no built-in timeout at all, which is exactly what
- * hangs in a serverless environment. `Promise.race` against our own AbortController is
- * what actually bounds the whole thing, connect included.
+ * Plain POST straight to the Studio Subgraph endpoint, bounded by a hard 5s deadline.
+ *
+ * This used to try the Subgraph MCP server (over SSE) first and only fall back to this
+ * direct query on failure. The MCP path is removed from the request flow entirely — its
+ * SSE handshake has no built-in timeout in the SDK and doesn't reliably resolve in a
+ * serverless environment, so it was the actual source of the Vercel hangs. This direct
+ * HTTP query is what the Subgraph MCP server itself would have queried anyway.
  */
-async function runMcpQuery(query: string, variables: Record<string, unknown>): Promise<string> {
-  const apiKey = process.env.GRAPH_GATEWAY_API_KEY;
-  if (!apiKey) {
-    throw new Error("GRAPH_GATEWAY_API_KEY is not configured on the server.");
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
-  let mcp: McpClient | undefined;
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    controller.signal.addEventListener("abort", () =>
-      reject(new Error(`Subgraph MCP call timed out after ${MCP_TIMEOUT_MS}ms.`))
-    );
-  });
-
-  const runPromise = (async () => {
-    const ipfsHash = await fetchDeploymentIpfsHash();
-
-    const transport = new SSEClientTransport(new URL(SUBGRAPH_MCP_URL), {
-      requestInit: { headers: { Authorization: `Bearer ${apiKey}` } },
-    });
-    mcp = new McpClient({ name: "levee-chat", version: "1.0.0" });
-
-    await mcp.connect(transport);
-    const result = await mcp.callTool({
-      name: "execute_query_by_ipfs_hash",
-      arguments: { ipfs_hash: ipfsHash, query, variables },
-    });
-
-    const content = Array.isArray(result.content) ? result.content : [];
-    const textPart = content.find(
-      (part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string"
-    );
-    return textPart?.text ?? JSON.stringify(result.content ?? {});
-  })();
-
-  try {
-    return await Promise.race([runPromise, timeoutPromise]);
-  } finally {
-    clearTimeout(timeout);
-    // Best-effort cleanup only — never await this, or a hung close() would defeat the
-    // whole point of the race above.
-    mcp?.close().catch(() => {});
-  }
-}
-
-/** Same query, sent as a plain POST straight to the Studio endpoint — no MCP involved. */
 async function runDirectSubgraphQuery(query: string, variables: Record<string, unknown>): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DIRECT_SUBGRAPH_FALLBACK_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), DIRECT_SUBGRAPH_TIMEOUT_MS);
 
   try {
     const res = await fetch(SUBGRAPH_URL, {
@@ -346,7 +281,7 @@ async function runDirectSubgraphQuery(query: string, variables: Record<string, u
     return JSON.stringify(json.data ?? {});
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`Direct Subgraph query timed out after ${DIRECT_SUBGRAPH_FALLBACK_TIMEOUT_MS}ms.`);
+      throw new Error(`Direct Subgraph query timed out after ${DIRECT_SUBGRAPH_TIMEOUT_MS}ms.`);
     }
     throw err;
   } finally {
@@ -359,10 +294,6 @@ async function runDirectSubgraphQuery(query: string, variables: Record<string, u
  * the `where: { user }` filter) is always built here, server-side, from the connected
  * wallet. The model has no parameter through which it could supply its own filter or
  * address, so a call can never return another wallet's data.
- *
- * If the MCP path hangs or errors (bounded to 5s above), this falls back to the same
- * query run as a plain HTTP request against the Subgraph directly, so a broken or slow
- * MCP connection degrades to a working answer instead of stalling the whole chat request.
  */
 async function callSubgraphMcp(walletAddress: `0x${string}`, args: Record<string, unknown>): Promise<string> {
   const entity = args.entity;
@@ -382,14 +313,7 @@ async function callSubgraphMcp(walletAddress: `0x${string}`, args: Record<string
   `;
   const variables = { user: walletAddress.toLowerCase() };
 
-  try {
-    return await runMcpQuery(query, variables);
-  } catch (err) {
-    console.error(
-      `Subgraph MCP call failed, falling back to a direct Subgraph HTTP query: ${err instanceof Error ? err.message : String(err)}`
-    );
-    return await runDirectSubgraphQuery(query, variables);
-  }
+  return runDirectSubgraphQuery(query, variables);
 }
 
 async function buildContext(walletAddress: `0x${string}`) {
@@ -527,6 +451,7 @@ async function askGemini(
     const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
 
     let res: Response;
+    console.log(`[chat] calling Gemini: model=${GEMINI_MODEL} timeoutMs=${GEMINI_TIMEOUT_MS}`);
     try {
       res = await fetch(endpoint, {
         method: "POST",
@@ -538,11 +463,13 @@ async function askGemini(
         }),
         signal: controller.signal,
       });
+      console.log(`[chat] Gemini fetch returned: status=${res.status}`);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
-        console.error(`Gemini API request timed out after ${GEMINI_TIMEOUT_MS}ms (model=${GEMINI_MODEL}).`);
+        console.error(`[chat] Gemini API request timed out after ${GEMINI_TIMEOUT_MS}ms (model=${GEMINI_MODEL}).`);
         throw new Error(`Gemini API request timed out after ${GEMINI_TIMEOUT_MS / 1000}s.`);
       }
+      console.error(`[chat] Gemini fetch threw before returning a response: ${err instanceof Error ? err.message : String(err)}`);
       throw err;
     } finally {
       clearTimeout(timeout);
